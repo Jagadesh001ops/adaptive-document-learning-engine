@@ -300,7 +300,11 @@ def health():
 
     with contextlib.suppress(Exception):
         import redis as _redis
-        r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), socket_connect_timeout=2)
+        _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        _kwargs = {"socket_connect_timeout": 5}
+        if _redis_url.startswith("rediss://"):
+            _kwargs["ssl_cert_reqs"] = None  # Upstash TLS — skip cert verification
+        r = _redis.from_url(_redis_url, **_kwargs)
         r.ping()
         redis_ok = True
 
