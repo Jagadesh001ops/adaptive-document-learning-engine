@@ -119,9 +119,15 @@ async def _enqueue(job_name: str, **kwargs):
     import os
 
     from arq.connections import RedisSettings, create_pool
-    url = os.getenv("REDIS_URL", "redis://localhost:6379").removeprefix("redis://")
+    raw = os.getenv("REDIS_URL", "redis://localhost:6379")
+    # Strip both redis:// and rediss:// (TLS) before parsing host:port for ARQ.
+    url = raw.removeprefix("rediss://").removeprefix("redis://")
+    # Upstash URLs include credentials: default:password@host:port
+    if "@" in url:
+        url = url.split("@", 1)[1]
     host, _, port_str = url.partition(":")
-    settings = RedisSettings(host=host, port=int(port_str) if port_str else 6379)
+    ssl = raw.startswith("rediss://")
+    settings = RedisSettings(host=host, port=int(port_str) if port_str else 6379, ssl=ssl)
     redis = await create_pool(settings)
     await redis.enqueue_job(job_name, **kwargs)
     await redis.aclose()
