@@ -7,22 +7,11 @@ on:
     branches: [main]
     types: [completed]
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Image tag to deploy (default: commit SHA)"
-        required: false
 
 # Prevents two deployments running at the same time.
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  REGISTRY: ghcr.io
-  # Placeholders — overridden with lowercase values in each job that uses them.
-  # (github.repository preserves the owner's casing; Docker requires lowercase.)
-  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
 
 jobs:
   # ── 1. Only run if CI succeeded ─────────────────────────────────────────────
@@ -35,66 +24,10 @@ jobs:
     steps:
       - run: echo "CI passed. Proceeding with CD."
 
-  # ── 2. Build & push Docker images ───────────────────────────────────────────
-  build:
-    name: Build images
-    needs: guard
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    outputs:
-      image-tag: ${{ steps.tag.outputs.tag }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set lowercase image names
-        run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "BACKEND_IMAGE=ghcr.io/${REPO_LC}/backend" >> "$GITHUB_ENV"
-          echo "FRONTEND_IMAGE=ghcr.io/${REPO_LC}/frontend" >> "$GITHUB_ENV"
-
-      - name: Compute image tag
-        id: tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push backend
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-            ${{ env.BACKEND_IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push frontend
-        uses: docker/build-push-action@v6
-        with:
-          context: frontend
-          push: true
-          tags: |
-            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
-            ${{ env.FRONTEND_IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ── 3. Smoke tests against service containers ────────────────────────────────
+  # ── 2. Smoke tests against service containers ────────────────────────────────
   smoke:
     name: Smoke tests
-    needs: build
+    needs: guard
     runs-on: ubuntu-latest
 
     services:
@@ -143,7 +76,7 @@ jobs:
       - name: Run smoke tests
         run: pytest tests/test_smoke.py -v --tb=short
 
-  # ── 4. Human approval gate ───────────────────────────────────────────────────
+  # ── 3. Human approval gate ───────────────────────────────────────────────────
   #
   # Create a GitHub Environment named "production" in:
   #   Settings → Environments → New environment → Add required reviewers
@@ -158,85 +91,55 @@ jobs:
       - name: Deployment approved
         run: echo "Deployment to production approved by ${{ github.actor }}."
 
-  # ── 5. Deploy ─────────────────────────────────────────────────────────────────
+  # ── 4. Deploy to Render ───────────────────────────────────────────────────────
   #
-  # Required secrets (set in repo Settings → Secrets → Actions):
-  #   DEPLOY_HOST       — SSH hostname or IP of the production server
-  #   DEPLOY_USER       — SSH username
-  #   DEPLOY_SSH_KEY    — private key (RSA or Ed25519)
-  #   DEPLOY_ENV_FILE   — full contents of the production .env file
+  # Required secret (repo Settings → Secrets → Actions):
+  #   RENDER_DEPLOY_HOOK_URL — deploy hook URL from Render dashboard
+  #                            (service → Settings → Deploy Hook → Copy)
+  #
+  # Render pulls from GitHub and builds using the Dockerfile automatically.
+  # Set environment variables (DATABASE_URL, REDIS_URL, GROQ_API_KEY, etc.)
+  # directly in the Render service dashboard — Environment tab.
+  # Rollback: Render dashboard → service → Events → redeploy any past deploy.
   deploy:
-    name: Deploy to production
+    name: Deploy to Render
     needs: gate
     runs-on: ubuntu-latest
+    if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set lowercase image names
+      - name: Trigger Render deployment
+        # URL is passed via env — never interpolated into the shell command,
+        # so it cannot appear in curl error output or process argument lists.
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "BACKEND_IMAGE=ghcr.io/${REPO_LC}/backend" >> "$GITHUB_ENV"
-          echo "FRONTEND_IMAGE=ghcr.io/${REPO_LC}/frontend" >> "$GITHUB_ENV"
+          DEPLOY_ID=$(curl -f -s -X POST "$HOOK_URL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+          echo "RENDER_DEPLOY_ID=$DEPLOY_ID" >> "$GITHUB_ENV"
+          echo "Deploy triggered — ID: ${DEPLOY_ID:-unknown}"
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: BACKEND_IMAGE,FRONTEND_IMAGE,GITHUB_SHA
-          script: |
-            set -e
-            cd /opt/ai-automation-engine
-
-            # Write the production .env (injected as a secret)
-            echo '${{ secrets.DEPLOY_ENV_FILE }}' > .env
-
-            # Pull new images
-            docker pull ${BACKEND_IMAGE}:${GITHUB_SHA}
-            docker pull ${FRONTEND_IMAGE}:${GITHUB_SHA}
-
-            # Rolling restart — zero downtime for stateless app+frontend
-            IMAGE_TAG=${GITHUB_SHA} docker compose up -d --no-deps --pull never app worker frontend
-
-            # Wait for health to become green (up to 60 s)
-            for i in $(seq 1 12); do
-              STATUS=$(curl -sf http://localhost:8000/health | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unreachable")
-              echo "[$i/12] health: $STATUS"
-              [ "$STATUS" = "ok" ] && break
-              sleep 5
-            done
-
-            [ "$STATUS" = "ok" ] || (echo "Health check failed after deploy" && exit 1)
+      - name: Wait for Render build to complete
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+        # Polls /health every 15 s for up to 10 min.
+        # Skipped automatically when RENDER_API_KEY is not set.
+        if: ${{ env.RENDER_DEPLOY_ID != '' && secrets.RENDER_API_KEY != '' }}
+        run: |
+          for i in $(seq 1 40); do
+            STATUS=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$RENDER_DEPLOY_ID" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('deploy',{}).get('status',''))" 2>/dev/null || echo "unknown")
+            echo "[$i/40] deploy status: $STATUS"
+            [ "$STATUS" = "live" ] && break
+            [ "$STATUS" = "build_failed" ] && echo "Render build failed" && exit 1
+            [ "$STATUS" = "deactivated" ] && echo "Render deploy deactivated" && exit 1
+            sleep 15
+          done
+          [ "$STATUS" = "live" ] || echo "Warning: deploy did not reach 'live' within 10 min — check Render dashboard"
 
       - name: Record deployment
         if: success()
         run: |
-          echo "Deployed backend ${{ env.BACKEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Deployed frontend ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
-
-  # ── 6. Rollback on failure ───────────────────────────────────────────────────
-  rollback:
-    name: Rollback on deploy failure
-    needs: deploy
-    if: failure()
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Rollback to previous image
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            cd /opt/ai-automation-engine
-            # Pull and restart with the 'latest' tag, which still points
-            # to the last successful deploy before this one.
-            docker compose up -d --no-deps --pull always app worker frontend
-            echo "Rolled back to previous :latest image."
-
-      - name: Mark rollback in summary
-        run: echo "⚠️ Deploy failed — rolled back to previous :latest image." >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy triggered on Render — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Render deploy ID: ${{ env.RENDER_DEPLOY_ID }}" >> "$GITHUB_STEP_SUMMARY"

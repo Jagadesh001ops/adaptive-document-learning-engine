@@ -17,7 +17,14 @@ except ImportError:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres123@localhost:5432/workflow_engine")
 
-engine = create_engine(DATABASE_URL)
+# Supabase (and most managed Postgres) require SSL. If the URL already
+# contains ?sslmode=require the driver honours it; passing connect_args
+# here ensures it even when the URL omits the param.
+_ssl_required = "supabase" in DATABASE_URL or os.getenv("DB_SSL", "") == "1"
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"sslmode": "require"} if _ssl_required else {},
+)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
