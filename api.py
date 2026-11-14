@@ -291,28 +291,40 @@ def health():
     """Deep health check: pings Postgres and Redis, returns 503 when degraded."""
     db_ok = False
     redis_ok = False
+    db_error = None
+    redis_error = None
 
-    with contextlib.suppress(Exception):
+    try:
         db = SessionLocal()
         db.execute(text("SELECT 1"))
         db.close()
         db_ok = True
+    except Exception as e:
+        db_error = str(e)
 
-    with contextlib.suppress(Exception):
+    try:
         import redis as _redis
         _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         _kwargs = {"socket_connect_timeout": 5}
         if _redis_url.startswith("rediss://"):
-            _kwargs["ssl_cert_reqs"] = None  # Upstash TLS — skip cert verification
+            _kwargs["ssl_cert_reqs"] = None
         r = _redis.from_url(_redis_url, **_kwargs)
         r.ping()
         redis_ok = True
+    except Exception as e:
+        redis_error = str(e)
 
     overall = "ok" if (db_ok and redis_ok) else "degraded"
-    return JSONResponse(
-        {"status": overall, "db": "ok" if db_ok else "error", "redis": "ok" if redis_ok else "error"},
-        status_code=200 if overall == "ok" else 503,
-    )
+    payload = {
+        "status": overall,
+        "db": "ok" if db_ok else "error",
+        "redis": "ok" if redis_ok else "error",
+    }
+    if db_error:
+        payload["db_error"] = db_error
+    if redis_error:
+        payload["redis_error"] = redis_error
+    return JSONResponse(payload, status_code=200 if overall == "ok" else 503)
 
 
 @app.get("/runs")
