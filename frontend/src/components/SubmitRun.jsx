@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
+import { apiFetch } from "../lib/api"
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000"
 const ACCEPT = ".pdf,.txt,.md,text/plain,application/pdf,text/markdown"
 
 export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
@@ -33,7 +33,7 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
       try {
         const form = new FormData()
         form.append("file", file)
-        const res = await fetch(`${API}/documents`, { method: "POST", body: form })
+        const res = await apiFetch("/documents", { method: "POST", body: form })
         if (!res.ok) {
           const body = await res.json().catch(() => ({}))
           throw new Error(body.detail || `Upload failed: ${res.status}`)
@@ -52,9 +52,8 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
 
     setStreaming(true)
     try {
-      const res = await fetch(`${API}/run/stream`, {
+      const res = await apiFetch("/run/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           document: documentText,
           request,
