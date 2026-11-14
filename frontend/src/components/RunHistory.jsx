@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react"
-
-const API_URL = import.meta.env.VITE_API_URL
+import { apiFetch } from "../lib/api"
 
 export default function RunHistory({ onSelectRun }) {
   const [runs, setRuns] = useState([])
@@ -9,13 +8,7 @@ export default function RunHistory({ onSelectRun }) {
   const [loadingRun, setLoadingRun] = useState(null)
 
   useEffect(() => {
-    if (!API_URL) {
-      setError("VITE_API_URL is not configured.")
-      setLoading(false)
-      return
-    }
-
-    fetch(`${API_URL}/runs`)
+    apiFetch("/runs")
       .then(res => res.json())
       .then(data => { setRuns(data); setLoading(false) })
       .catch(err => { setError(err.message); setLoading(false) })
@@ -24,9 +17,7 @@ export default function RunHistory({ onSelectRun }) {
   async function handleSelect(run) {
     setLoadingRun(run.id)
     try {
-      if (!API_URL) throw new Error("VITE_API_URL is not configured.")
-
-      const res = await fetch(`${API_URL}/runs/${run.id}`)
+      const res = await apiFetch(`/runs/${run.id}`)
       const data = await res.json()
       onSelectRun(data)
     } catch (err) {

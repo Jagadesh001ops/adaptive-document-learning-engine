@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { apiFetch } from '../lib/api'
 
 export default function Library({ onSelectDoc }) {
   const [docs, setDocs] = useState([])
@@ -10,7 +9,7 @@ export default function Library({ onSelectDoc }) {
   const load = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${API}/documents`)
+      const res = await apiFetch("/documents")
       if (res.ok) setDocs(await res.json())
     } catch { /* ignore fetch errors */ }
     setLoading(false)
@@ -22,7 +21,7 @@ export default function Library({ onSelectDoc }) {
     if (!confirm('Delete this document?')) return
     setDeleting(id)
     try {
-      await fetch(`${API}/documents/${id}`, { method: 'DELETE' })
+      await apiFetch(`/documents/${id}`, { method: 'DELETE' })
       setDocs(d => d.filter(x => x.document_id !== id))
     } catch { /* ignore fetch errors */ }
     setDeleting(null)

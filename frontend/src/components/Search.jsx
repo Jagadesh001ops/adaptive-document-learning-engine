@@ -1,6 +1,5 @@
 import { useState } from 'react'
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { apiFetch } from '../lib/api'
 
 export default function Search() {
   const [q, setQ] = useState('')
@@ -15,7 +14,7 @@ export default function Search() {
     setError(null)
     setResults(null)
     try {
-      const res = await fetch(`${API}/search?q=${encodeURIComponent(q)}&top_k=10`)
+      const res = await apiFetch(`/search?q=${encodeURIComponent(q)}&top_k=10`)
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setResults(data.results)
