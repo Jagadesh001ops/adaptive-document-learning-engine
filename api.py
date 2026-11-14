@@ -305,6 +305,7 @@ def health():
     try:
         import ssl as _ssl
         import urllib.parse as _urlparse
+
         import redis as _redis
         _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         _p = _urlparse.urlparse(_redis_url)
