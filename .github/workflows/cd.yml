@@ -91,36 +91,27 @@ jobs:
       - name: Deployment approved
         run: echo "Deployment to production approved by ${{ github.actor }}."
 
-  # ── 4. Deploy to Railway ──────────────────────────────────────────────────────
+  # ── 4. Deploy to Render ───────────────────────────────────────────────────────
   #
-  # Required secrets (repo Settings → Secrets → Actions):
-  #   RAILWAY_TOKEN      — project token from Railway dashboard
-  #                        (project → Settings → Tokens → New Token)
-  # Required variables (repo Settings → Secrets and variables → Variables):
-  #   RAILWAY_PROJECT_ID — project ID from Railway dashboard
-  #                        (project → Settings → General → Project ID)
+  # Required secret (repo Settings → Secrets → Actions):
+  #   RENDER_DEPLOY_HOOK_URL — deploy hook URL from Render dashboard
+  #                            (service → Settings → Deploy Hook → Copy)
   #
-  # Railway handles rollback via its dashboard (Deployments → ⋯ → Rollback).
-  # Set environment variables (DATABASE_URL, GROQ_API_KEY, etc.) directly in
-  # the Railway service dashboard — no .env file secret needed.
+  # Render pulls from GitHub and builds using the Dockerfile automatically.
+  # Set environment variables (DATABASE_URL, REDIS_URL, GROQ_API_KEY, etc.)
+  # directly in the Render service dashboard — Environment tab.
+  # Rollback: Render dashboard → service → Events → redeploy any past deploy.
   deploy:
-    name: Deploy to Railway
+    name: Deploy to Render
     needs: gate
     runs-on: ubuntu-latest
-    if: ${{ secrets.RAILWAY_TOKEN != '' }}
+    if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Deploy backend to Railway
-        run: railway up --service backend --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      - name: Trigger Render deployment
+        run: |
+          curl -f -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
 
       - name: Record deployment
         if: success()
-        run: echo "Deployed to Railway — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Deploy triggered on Render — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
