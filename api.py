@@ -303,13 +303,22 @@ def health():
         db_error = str(e)
 
     try:
+        import ssl as _ssl
+        import urllib.parse as _urlparse
         import redis as _redis
         _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        _kwargs = {"socket_connect_timeout": 5}
-        if _redis_url.startswith("rediss://"):
-            _kwargs["ssl_cert_reqs"] = None
-        r = _redis.from_url(_redis_url, **_kwargs)
-        r.ping()
+        _p = _urlparse.urlparse(_redis_url)
+        _r = _redis.Redis(
+            host=_p.hostname,
+            port=_p.port or 6379,
+            password=_p.password,
+            username=_p.username or "default",
+            ssl=_redis_url.startswith("rediss://"),
+            ssl_cert_reqs=_ssl.CERT_NONE,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        _r.ping()
         redis_ok = True
     except Exception as e:
         redis_error = str(e)
