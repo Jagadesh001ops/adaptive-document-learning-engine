@@ -109,9 +109,37 @@ jobs:
 
     steps:
       - name: Trigger Render deployment
+        # URL is passed via env — never interpolated into the shell command,
+        # so it cannot appear in curl error output or process argument lists.
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
-          curl -f -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+          DEPLOY_ID=$(curl -f -s -X POST "$HOOK_URL" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+          echo "RENDER_DEPLOY_ID=$DEPLOY_ID" >> "$GITHUB_ENV"
+          echo "Deploy triggered — ID: ${DEPLOY_ID:-unknown}"
+
+      - name: Wait for Render build to complete
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+        # Polls /health every 15 s for up to 10 min.
+        # Skipped automatically when RENDER_API_KEY is not set.
+        if: ${{ env.RENDER_DEPLOY_ID != '' && secrets.RENDER_API_KEY != '' }}
+        run: |
+          for i in $(seq 1 40); do
+            STATUS=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$RENDER_DEPLOY_ID" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('deploy',{}).get('status',''))" 2>/dev/null || echo "unknown")
+            echo "[$i/40] deploy status: $STATUS"
+            [ "$STATUS" = "live" ] && break
+            [ "$STATUS" = "build_failed" ] && echo "Render build failed" && exit 1
+            [ "$STATUS" = "deactivated" ] && echo "Render deploy deactivated" && exit 1
+            sleep 15
+          done
+          [ "$STATUS" = "live" ] || echo "Warning: deploy did not reach 'live' within 10 min — check Render dashboard"
 
       - name: Record deployment
         if: success()
-        run: echo "Deploy triggered on Render — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "Deploy triggered on Render — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Render deploy ID: ${{ env.RENDER_DEPLOY_ID }}" >> "$GITHUB_STEP_SUMMARY"
