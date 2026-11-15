@@ -24,6 +24,11 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 COPY --from=builder /install /usr/local
 COPY . .
 
+# Pre-download the sentence-transformers model so it's baked into the image.
+# HF_HOME must be writable by appuser at runtime.
+ENV HF_HOME=/app/.cache/huggingface
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 RUN chown -R appuser:appgroup /app
 USER appuser
 
