@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react"
-import { supabase } from "./lib/supabase"
-import Auth from "./components/Auth"
+import { useState } from "react"
+// import { supabase } from "./lib/supabase"
+// import Auth from "./components/Auth"
 import SubmitRun from "./components/SubmitRun"
 import Results from "./components/Results"
 import RunHistory from "./components/RunHistory"
@@ -15,19 +15,19 @@ const TABS = [
 ]
 
 export default function App() {
-  const [session, setSession] = useState(undefined)
+  // const [session, setSession] = useState(undefined)
   const [screen, setScreen] = useState("submit")
   const [currentRun, setCurrentRun] = useState(null)
   const [selectedDoc, setSelectedDoc] = useState(null)
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session))
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
-      setSession(session)
-    })
-    return () => subscription.unsubscribe()
-  }, [])
-
+  // Auth disabled temporarily — uncomment to re-enable
+  // useEffect(() => {
+  //   supabase.auth.getSession().then(({ data: { session } }) => setSession(session))
+  //   const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+  //     setSession(session)
+  //   })
+  //   return () => subscription.unsubscribe()
+  // }, [])
   // if (session === undefined) return null
   // if (!session) return <Auth />
 
