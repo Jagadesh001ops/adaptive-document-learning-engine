@@ -173,7 +173,10 @@ async def upload_document(
         db.close()
 
     if created:
+        _async_ingest = os.getenv("ASYNC_INGEST", "1") == "1"
         try:
+            if not _async_ingest:
+                raise RuntimeError("ASYNC_INGEST=0 — forcing sync ingestion")
             await _enqueue("ingest_document", document_id=doc_id, raw_bytes=data)
         except Exception as exc:
             import logging
