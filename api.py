@@ -59,13 +59,14 @@ async def maintenance_gate(request: Request, call_next):
 
 _cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 _extra = os.getenv("CORS_ORIGINS", "")
+_allow_all = os.getenv("CORS_ALLOW_ALL", "") == "1"
 if _extra:
     _cors_origins += [o.strip() for o in _extra.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"] if _allow_all else _cors_origins,
+    allow_credentials=not _allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )
