@@ -28,9 +28,8 @@ export default function App() {
     return () => subscription.unsubscribe()
   }, [])
 
-  if (session === undefined) return null
-
-  if (!session) return <Auth />
+  // if (session === undefined) return null
+  // if (!session) return <Auth />
 
   function handleRunComplete(run) {
     setCurrentRun(run)
@@ -62,12 +61,7 @@ export default function App() {
               </button>
             ))}
           </div>
-          <button
-            onClick={() => supabase.auth.signOut()}
-            className="text-xs text-gray-500 hover:text-white transition ml-2"
-          >
-            Sign out
-          </button>
+          {/* Sign out button hidden while auth is disabled */}
         </div>
       </nav>
 
