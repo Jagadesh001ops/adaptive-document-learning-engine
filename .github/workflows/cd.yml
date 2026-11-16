@@ -117,28 +117,20 @@ jobs:
             exit 0
           fi
 
-          # Write the SSH key to a temp file
           KEY_FILE=$(mktemp)
           echo "$OCI_SSH_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
 
-          ssh -i "$KEY_FILE" \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=30 \
-            "$OCI_USER@$OCI_HOST" << 'ENDSSH'
-            set -e
-            cd ~/ai-automation-engine
-            git pull origin main
-            docker build -t ai-engine .
-            docker rm -f ai-engine || true
-            docker run -d \
-              --name ai-engine \
-              --env-file ~/.env \
-              -p 8000:8000 \
-              --restart unless-stopped \
-              ai-engine
-            echo "Deploy complete — $(docker ps --filter name=ai-engine --format '{{.Status}}')"
-ENDSSH
+          REMOTE_CMD="set -e
+          cd ~/ai-automation-engine
+          git pull origin main
+          docker build -t ai-engine .
+          docker rm -f ai-engine || true
+          docker run -d --name ai-engine --env-file ~/.env -p 8000:8000 --restart unless-stopped ai-engine
+          docker ps --filter name=ai-engine
+          echo Deploy complete"
+
+          ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "$OCI_USER@$OCI_HOST" "$REMOTE_CMD"
 
           rm -f "$KEY_FILE"
 
