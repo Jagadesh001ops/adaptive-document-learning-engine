@@ -37,8 +37,9 @@ from engine.llm_nodes import build_node_for_step
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Runs once when the server starts (not on import) — safe to connect to DB here.
-    init_db()
+    # Run init_db in a background thread so the port binds immediately.
+    import threading
+    threading.Thread(target=init_db, daemon=True).start()
     yield
 
 
