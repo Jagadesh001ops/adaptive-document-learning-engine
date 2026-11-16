@@ -12,8 +12,7 @@ from typing import List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -174,7 +173,7 @@ async def upload_document(
     finally:
         db.close()
 
-    if created or doc_status == "processing":
+    if created:
         _async_ingest = os.getenv("ASYNC_INGEST", "1") == "1"
         try:
             if not _async_ingest:
@@ -571,15 +570,3 @@ def _build_engine(plan, body: RunRequest) -> ExecutionEngine:
             node._difficulty = body.difficulty or "medium"
         eng.register_node(step.name, node)
     return eng
-
-
-# ─── Frontend static files ────────────────────────────────────────────────────
-# Serve React build when frontend/dist exists (production Docker image).
-# Must be mounted after all API routes so API paths take priority.
-_frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
-if os.path.exists(_frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
-
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_frontend(full_path: str):
-        return FileResponse(os.path.join(_frontend_dist, "index.html"))
