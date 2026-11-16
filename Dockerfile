@@ -5,7 +5,6 @@ WORKDIR /frontend
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
-COPY frontend/.env.production .env.production
 RUN npm run build
 
 # ── Stage 1: install Python dependencies ──────────────────────────────────────
