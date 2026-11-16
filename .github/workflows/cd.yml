@@ -91,60 +91,58 @@ jobs:
       - name: Deployment approved
         run: echo "Deployment to production approved by ${{ github.actor }}."
 
-  # ── 4. Deploy to Render ───────────────────────────────────────────────────────
+  # ── 4. Deploy to Oracle Cloud VM ─────────────────────────────────────────────
   #
-  # Required secret (repo Settings → Secrets → Actions):
-  #   RENDER_DEPLOY_HOOK_URL — deploy hook URL from Render dashboard
-  #                            (service → Settings → Deploy Hook → Copy)
+  # Required secrets (repo Settings → Secrets → Actions):
+  #   OCI_SSH_KEY — private SSH key contents
+  #   OCI_HOST    — VM public IP (variable, not secret)
+  #   OCI_USER    — SSH user, e.g. ubuntu (variable, not secret)
   #
-  # Render pulls from GitHub and builds using the Dockerfile automatically.
-  # Set environment variables (DATABASE_URL, REDIS_URL, GROQ_API_KEY, etc.)
-  # directly in the Render service dashboard — Environment tab.
-  # Rollback: Render dashboard → service → Events → redeploy any past deploy.
+  # The VM must have Docker installed and the repo cloned at ~/ai-automation-engine.
+  # App env vars live in ~/.env on the VM (not committed to git).
   deploy:
-    name: Deploy to Render
+    name: Deploy to Oracle Cloud
     needs: gate
     runs-on: ubuntu-latest
 
     steps:
-      - name: Trigger Render deployment
-        # URL and API key passed via env — never interpolated into shell commands.
-        # Skips gracefully when RENDER_DEPLOY_HOOK_URL is not set.
+      - name: Deploy via SSH
         env:
-          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          OCI_HOST: ${{ vars.OCI_HOST }}
+          OCI_USER: ${{ vars.OCI_USER }}
         run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "RENDER_DEPLOY_HOOK_URL not set — skipping deploy"
+          if [ -z "$OCI_SSH_KEY" ] || [ -z "$OCI_HOST" ] || [ -z "$OCI_USER" ]; then
+            echo "OCI secrets not set — skipping deploy"
             exit 0
           fi
 
-          DEPLOY_ID=$(curl -f -s -X POST "$HOOK_URL" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
-          echo "Deploy triggered — ID: ${DEPLOY_ID:-unknown}"
-          echo "RENDER_DEPLOY_ID=${DEPLOY_ID}" >> "$GITHUB_ENV"
+          # Write the SSH key to a temp file
+          KEY_FILE=$(mktemp)
+          echo "$OCI_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
 
-          # Poll for build completion if API key and service ID are available.
-          if [ -z "$RENDER_API_KEY" ] || [ -z "$RENDER_SERVICE_ID" ] || [ -z "$DEPLOY_ID" ]; then
-            echo "RENDER_API_KEY / RENDER_SERVICE_ID not set — skipping status poll"
-            exit 0
-          fi
+          ssh -i "$KEY_FILE" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            "$OCI_USER@$OCI_HOST" << 'ENDSSH'
+            set -e
+            cd ~/ai-automation-engine
+            git pull origin main
+            docker build -t ai-engine .
+            docker rm -f ai-engine || true
+            docker run -d \
+              --name ai-engine \
+              --env-file ~/.env \
+              -p 8000:8000 \
+              --restart unless-stopped \
+              ai-engine
+            echo "Deploy complete — $(docker ps --filter name=ai-engine --format '{{.Status}}')"
+ENDSSH
 
-          for i in $(seq 1 40); do
-            STATUS=$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$DEPLOY_ID" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin).get('deploy',{}).get('status',''))" 2>/dev/null || echo "unknown")
-            echo "[$i/40] deploy status: $STATUS"
-            [ "$STATUS" = "live" ] && break
-            [ "$STATUS" = "build_failed" ] && echo "Render build failed" && exit 1
-            [ "$STATUS" = "deactivated" ] && echo "Render deploy deactivated" && exit 1
-            sleep 15
-          done
-          [ "$STATUS" = "live" ] || echo "Warning: deploy did not reach 'live' within 10 min — check Render dashboard"
+          rm -f "$KEY_FILE"
 
       - name: Record deployment
         if: success()
         run: |
-          echo "Deploy triggered on Render — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Render deploy ID: ${{ env.RENDER_DEPLOY_ID }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed to Oracle Cloud VM ${{ vars.OCI_HOST }} — commit ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
