@@ -338,3 +338,72 @@ def test_search_no_docs_returns_empty():
     res = client.get("/search", params={"q": "anything"})
     assert res.status_code == 200
     assert res.json()["results"] == []
+
+
+# ── Run with a library document ───────────────────────────────────────────────
+
+def _library_doc(user_id: str = "dev-user", chunks=()):
+    from engine.database import DocumentChunk, get_or_create_document
+    db = SessionLocal()
+    try:
+        doc, _ = get_or_create_document(
+            db, filename="lib.txt", content_type="text/plain", size_bytes=10,
+            page_count=1, char_count=10, content_hash=f"lib-{user_id}-{len(chunks)}",
+            user_id=user_id,
+        )
+        for i, (start, end, text) in enumerate(chunks):
+            db.add(DocumentChunk(document_id=doc.id, chunk_index=i, char_start=start,
+                                 char_end=end, content_hash=f"h{doc.id}-{i}", text=text))
+        db.commit()
+        return doc.id
+    finally:
+        db.close()
+
+
+def _cleanup_doc(doc_id: int):
+    from engine.database import DocumentChunk
+    db = SessionLocal()
+    try:
+        db.query(DocumentChunk).filter_by(document_id=doc_id).delete()
+        db.query(Document).filter_by(id=doc_id).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_run_with_document_id_uses_stored_chunks():
+    # "Hello world. Goodbye." split into two chunks overlapping on "world. "
+    doc_id = _library_doc(chunks=[(0, 13, "Hello world. "), (6, 21, "world. Goodbye.")])
+    node = _fake_node()
+    try:
+        with (
+            patch("api.parse_intent", return_value=_make_plan()),
+            patch("api.build_node_for_step", return_value=node),
+        ):
+            res = client.post("/run", json={"document": "[Document: lib.txt]",
+                                             "request": "summarise", "document_id": doc_id})
+        assert res.status_code == 200, res.text
+        state = node.execute.call_args[0][0]
+        assert state["document"] == "Hello world. Goodbye."
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_run_with_unprocessed_document_returns_409():
+    doc_id = _library_doc()
+    try:
+        res = client.post("/run", json={"document": "x", "request": "summarise",
+                                         "document_id": doc_id})
+        assert res.status_code == 409
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_run_with_other_users_document_returns_404():
+    doc_id = _library_doc(user_id="someone-else", chunks=[(0, 5, "Hello")])
+    try:
+        res = client.post("/run", json={"document": "x", "request": "summarise",
+                                         "document_id": doc_id})
+        assert res.status_code == 404
+    finally:
+        _cleanup_doc(doc_id)

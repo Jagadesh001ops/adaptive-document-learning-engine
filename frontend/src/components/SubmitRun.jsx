@@ -25,29 +25,25 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
     setError(null)
     setSteps([])
 
-    let documentText
+    // The backend loads the document's extracted text from document_id.
+    let documentId = prefillDoc?.document_id ?? null
+    const documentText = `[Document: ${file ? file.name : prefillDoc.filename}]`
 
     if (file) {
-      // Upload file, get document_id; also read text locally for the run
       setUploading(true)
       try {
         const form = new FormData()
         form.append("file", file)
         const res = await apiFetch("/documents", { method: "POST", body: form })
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}))
-          throw new Error(body.detail || `Upload failed: ${res.status}`)
-        }
-        documentText = await _readFileAsText(file)
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.detail || `Upload failed: ${res.status}`)
+        documentId = body.document_id
       } catch (err) {
         setError(err.message)
         return
       } finally {
         setUploading(false)
       }
-    } else {
-      // prefillDoc selected from Library — retrieval nodes use stored chunks
-      documentText = `[Document: ${prefillDoc.filename}]`
     }
 
     setStreaming(true)
@@ -57,7 +53,7 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
         body: JSON.stringify({
           document: documentText,
           request,
-          document_id: prefillDoc?.document_id ?? null,
+          document_id: documentId,
         }),
       })
       if (!res.ok) {
@@ -207,13 +203,4 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
       </div>
     </div>
   )
-}
-
-async function _readFileAsText(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = e => resolve(e.target.result)
-    reader.onerror = () => reject(new Error("Could not read file"))
-    reader.readAsText(file, "utf-8")
-  })
 }
