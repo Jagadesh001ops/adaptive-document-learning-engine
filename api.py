@@ -173,7 +173,7 @@ async def upload_document(
     finally:
         db.close()
 
-    if created:
+    if created or doc_status == "processing":
         _async_ingest = os.getenv("ASYNC_INGEST", "1") == "1"
         try:
             if not _async_ingest:
