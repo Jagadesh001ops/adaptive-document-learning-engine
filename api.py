@@ -359,12 +359,45 @@ def get_runs(user_id: str = Depends(get_current_user), db: Session = Depends(get
              "created_at": r.created_at} for r in runs]
 
 
+MAX_DOC_CHARS = int(os.getenv("MAX_DOC_CHARS", "24000"))
+
+
+def _join_chunks(chunks) -> str:
+    parts, covered = [], 0
+    for c in chunks:
+        # Chunks overlap; keep only text past what's already been added.
+        skip = max(0, covered - c.char_start)
+        parts.append(c.text[skip:])
+        covered = max(covered, c.char_end)
+    return "".join(parts)
+
+
+def _resolve_document_text(body: RunRequest, user_id: str) -> str:
+    if body.document_id is None:
+        return body.document
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter_by(id=body.document_id, user_id=user_id).first()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunks = (db.query(DocumentChunk)
+                  .filter_by(document_id=doc.id)
+                  .order_by(DocumentChunk.chunk_index)
+                  .all())
+    finally:
+        db.close()
+    if not chunks:
+        raise HTTPException(status_code=409, detail=f"Document is not ready (status: {doc.status})")
+    return _join_chunks(chunks)[:MAX_DOC_CHARS]
+
+
 @app.post("/run", response_model=RunResponse)
 def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
                  db: Session = Depends(get_db)):
+    document_text = _resolve_document_text(body, user_id)
     plan = parse_intent(body.request)
     engine = _build_engine(plan, body)
-    initial_state = {"document": body.document, "query": body.request}
+    initial_state = {"document": document_text, "query": body.request}
     final_state, traces = engine.run(plan, initial_state)
 
     step_results = [{"name": s.name, "input_key": s.input_key, "output_key": s.output_key}
@@ -391,6 +424,8 @@ def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
 
 @app.post("/run/stream")
 def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_user)):
+    document_text = _resolve_document_text(body, user_id)
+
     def event_generator():
         try:
             plan = parse_intent(body.request)
@@ -412,7 +447,7 @@ def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_use
             def _run():
                 try:
                     state, traces = engine.run(
-                        plan, {"document": body.document, "query": body.request},
+                        plan, {"document": document_text, "query": body.request},
                         on_step_start=_start, on_step_end=_end,
                     )
                     container["state"] = state
