@@ -137,7 +137,8 @@ jobs:
               -p 8000:8000 \
               --restart unless-stopped \
               ai-engine
-            echo "Deploy complete — $(docker ps --filter name=ai-engine --format '{{.Status}}')"
+            docker ps --filter name=ai-engine
+            echo "Deploy complete"
 ENDSSH
 
           rm -f "$KEY_FILE"
