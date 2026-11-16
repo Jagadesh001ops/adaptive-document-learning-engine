@@ -1,4 +1,14 @@
-# ── Stage 1: install dependencies ────────────────────────────────────────────
+# ── Stage 0: build React frontend ─────────────────────────────────────────────
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+COPY frontend/.env.production .env.production
+RUN npm run build
+
+# ── Stage 1: install Python dependencies ──────────────────────────────────────
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
@@ -23,6 +33,7 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
 COPY --from=builder /install /usr/local
 COPY . .
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 # Pre-download the sentence-transformers model so it's baked into the image.
 # HF_HOME must be writable by appuser at runtime.
