@@ -340,6 +340,25 @@ def test_search_no_docs_returns_empty():
     assert res.json()["results"] == []
 
 
+# ── Request context reaches steps ─────────────────────────────────────────────
+
+def test_run_passes_request_context_to_steps():
+    from engine.schemas import RequestBrief
+    plan = _make_plan()
+    plan.brief = RequestBrief(format="bullet points", count=3)
+    node = _fake_node()
+    with (
+        patch("api.parse_intent", return_value=plan),
+        patch("api.build_node_for_step", return_value=node),
+    ):
+        res = client.post("/run", json={"document": "Text.", "request": "bullet summary, 3 questions"})
+    assert res.status_code == 200, res.text
+    ctx = node.set_context.call_args[0][0]
+    assert ctx.request == "bullet summary, 3 questions"
+    assert ctx.goal == "Summarise" and ctx.instructions == "Summarise"
+    assert ctx.brief.preferences() == {"format": "bullet points", "count": 3}
+
+
 # ── Background processing status ──────────────────────────────────────────────
 
 def test_upload_returns_processing_then_becomes_ready():

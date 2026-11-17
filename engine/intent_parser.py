@@ -35,15 +35,38 @@ Analyse the user's request and return ONLY a JSON object:
     "scope": "single_document",
     "too_broad": false,
     "too_broad_reason": null,
+    "brief": {{
+        "format": null,
+        "length": null,
+        "count": null,
+        "difficulty": null,
+        "focus": null,
+        "audience": null,
+        "notes": null
+    }},
     "steps": [
         {{
             "name": "snake_case_step_name",
-            "description": "One sentence describing what this step does",
+            "description": "Instruction for this step, specific to the user's request",
             "input_key": "key this step reads from",
             "output_key": "key this step writes to"
         }}
     ]
 }}
+
+Brief rules:
+- Record only preferences the user actually stated; leave everything else null. Never invent preferences.
+- format: how output should look ("bullet points", "table"). length: how long ("two sentences", "detailed").
+- count: number of items requested (e.g. "three questions" -> 3). difficulty: "easy", "medium" or "hard".
+- focus: the part or topic of the document to concentrate on. audience: who it is for ("a 10-year-old").
+- notes: any other explicit instruction that doesn't fit the fields above.
+
+Step description rules:
+- Write each description as a direct instruction to that step, carrying over what the user asked for
+  that is relevant to it (focus, format, count, difficulty). Example: for "explain the causes of the
+  French Revolution simply and give me 3 hard questions", the summarize step's description is
+  "Summarize the causes of the French Revolution in plain language" and the quiz step's is
+  "Write 3 hard questions on the causes of the French Revolution".
 
 Scope rules:
 - "single_document"  — request concerns one specific document
@@ -93,5 +116,6 @@ def parse_intent(
     data.setdefault("scope", "single_document")
     data.setdefault("too_broad", False)
     data.setdefault("too_broad_reason", None)
+    data.setdefault("brief", {})
 
     return WorkflowPlan(**data)

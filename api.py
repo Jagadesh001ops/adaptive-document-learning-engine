@@ -43,7 +43,7 @@ from engine.database import (
 from engine.execution_engine import ExecutionEngine
 from engine.ingestion import ExtractionError, IngestionError, ingest
 from engine.intent_parser import parse_intent
-from engine.llm_nodes import build_node_for_step
+from engine.llm_nodes import StepContext, build_node_for_step
 
 
 @contextlib.asynccontextmanager
@@ -467,7 +467,7 @@ def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_use
             plan = parse_intent(body.request)
             step_metas = [{"name": s.name, "input_key": s.input_key, "output_key": s.output_key}
                           for s in plan.steps]
-            yield f"data: {json.dumps({'type': 'plan', 'goal': plan.goal, 'steps': step_metas, 'scope': plan.scope, 'too_broad': plan.too_broad})}\n\n"
+            yield f"data: {json.dumps({'type': 'plan', 'goal': plan.goal, 'steps': step_metas, 'scope': plan.scope, 'too_broad': plan.too_broad, 'brief': plan.brief.preferences()})}\n\n"
 
             if plan.too_broad:
                 yield f"data: {json.dumps({'type': 'error', 'message': plan.too_broad_reason or 'Request too broad'})}\n\n"
@@ -637,9 +637,11 @@ def _build_engine(plan, body: RunRequest) -> ExecutionEngine:
             name=step.name, description=step.description,
             input_key=step.input_key, output_key=step.output_key,
         )
-        # Inject difficulty into quiz nodes (Day 15)
         if hasattr(node, "_difficulty"):
             node._difficulty = body.difficulty or "medium"
+        if hasattr(node, "set_context"):
+            node.set_context(StepContext(request=body.request, goal=plan.goal,
+                                         instructions=step.description, brief=plan.brief))
         eng.register_node(step.name, node)
     return eng
 

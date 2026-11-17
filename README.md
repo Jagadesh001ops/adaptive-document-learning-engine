@@ -8,8 +8,9 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 
 - **Document library.** Upload PDF, TXT or Markdown files (up to 25 MB, 10 per user). Text is extracted, split into overlapping ~600-token chunks, embedded, and stored in Postgres with pgvector. Processing runs in the background and the UI shows its progress.
 - **Request → plan → run.** Your request is turned into an ordered list of steps. Each step reads one value from a shared state and writes another, e.g. `document → summary → quiz`.
+- **The request shapes every step.** The planner also pulls out what you asked for — format, length, number of questions, difficulty, focus, audience — and each step sees your original request, the overall goal and its own instructions. "Summarize chapter one as bullet points and give me three hard questions" gets bullet points and three hard questions, not a stock paragraph and five medium ones.
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
-- **Verified quizzes.** Generated questions go through a second pass where the model checks each answer against the source. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
+- **Quiz verification.** When a plan includes the `verify_quiz` step, the model checks each answer against the retrieved source passages. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
 - **Semantic search** across your uploaded documents.
 - **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
 
@@ -17,9 +18,9 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 
 | Step | Does |
 |---|---|
-| `summarize` | Condenses the text into a short paragraph of the main ideas |
-| `extract_concepts` | Pulls out the five most important concepts |
-| `generate_quiz` | Writes multiple-choice questions with explanations (easy / medium / hard) |
+| `summarize` | Condenses the text to its main ideas (a short paragraph unless you ask otherwise) |
+| `extract_concepts` | Pulls out the key concepts (five unless you ask for a different number) |
+| `generate_quiz` | Writes multiple-choice questions with explanations, grounded in the source (five at medium difficulty unless you ask otherwise) |
 | `retrieve_chunks` | Embeds the request and fetches the most relevant chunks from the index |
 | `verify_quiz` | Checks quiz answers against the source and regenerates failures |
 
@@ -137,6 +138,7 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
 - **`retrieve_chunks` searches all of a user's documents**, not only the one selected for the run.
+- **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
 - **Runs are stateless.** There's no follow-up ("make question 3 harder"); each request starts fresh.
 - **Auth is optional and currently off** in the deployed build.
 - **One model for everything.** There's no fallback provider when the LLM is rate-limited.
