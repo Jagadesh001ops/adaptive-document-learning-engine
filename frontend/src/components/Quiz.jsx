@@ -1,10 +1,24 @@
 import { useState } from "react"
 
 // A multiple-choice quiz the student can answer and check. Items: {question, options, answer,
-// explanation, verified?, citation?: {chunk_id, excerpt}}.
-export default function Quiz({ items, changed = null }) {
-  const [selected, setSelected] = useState({})
-  const [submitted, setSubmitted] = useState(false)
+// explanation, verified?, citation?: {chunk_id, excerpt}}. `saved` holds earlier answers keyed by
+// question number (from 1); `onSubmit(answers)` stores new ones and may throw.
+export default function Quiz({ items, changed = null, saved = null, onSubmit = null }) {
+  const [selected, setSelected] = useState(() =>
+    saved ? Object.fromEntries(Object.entries(saved).map(([n, letter]) => [Number(n) - 1, letter])) : {})
+  const [submitted, setSubmitted] = useState(() => !!saved && Object.keys(saved).length >= (items?.length || 0))
+  const [saveError, setSaveError] = useState(null)
+
+  async function check() {
+    setSubmitted(true)
+    setSaveError(null)
+    if (!onSubmit) return
+    try {
+      await onSubmit(Object.fromEntries(Object.entries(selected).map(([i, letter]) => [Number(i) + 1, letter])))
+    } catch (err) {
+      setSaveError(`Your answers weren't saved: ${err.message}`)
+    }
+  }
 
   if (!items?.length) return <p className="text-sm text-gray-500">No questions came back.</p>
 
@@ -66,7 +80,7 @@ export default function Quiz({ items, changed = null }) {
 
       {!submitted ? (
         <button
-          onClick={() => setSubmitted(true)}
+          onClick={check}
           disabled={Object.keys(selected).length < items.length}
           className="text-sm px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 rounded-md text-white transition"
         >
@@ -83,6 +97,7 @@ export default function Quiz({ items, changed = null }) {
           </button>
         </p>
       )}
+      {saveError && <p className="text-xs text-amber-300">{saveError}</p>}
     </div>
   )
 }

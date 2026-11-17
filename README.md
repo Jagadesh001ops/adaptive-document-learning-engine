@@ -11,6 +11,7 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 - **Quizzes grounded in the text.** Questions are written from document passages, not from a summary. Each one cites a passage, and code checks that the quoted excerpt really appears there; questions that fail are flagged, not hidden. The requested number of questions is enforced in code.
 - **Word-style exports.** Download a whole session, or one turn of it, as a PDF or a Word document. Each request becomes a heading, quotes are set as block quotes, questions are numbered with indented options, and the answer key is on its own page.
 - **Document library.** Upload PDF, TXT or Markdown files (up to 25 MB, 10 per user). Text is extracted, split into overlapping ~600-token chunks, embedded, and stored in Postgres with pgvector. Processing runs in the background and the UI shows its progress.
+- **Progress and what to do next.** Each document is mapped into up to 8 sections, titled once by a small model. The Library shows which sections have been read, quizzed and answered well or badly, what you've done so far, and one suggested next task: get an overview, finish an open quiz, go back over a section you missed questions on, study the next section, test yourself on one you've only read, and finally test the whole document. The suggestion is picked by rules in code and opens the study session with that request. You can also name sections yourself: "summarize section 3" or "quiz me on pages 9-12" reads exactly that part.
 - **Request → plan → run.** Your request is turned into an ordered list of steps. Each step reads one value from a shared state and writes another, e.g. `document → summary → quiz`.
 - **The request shapes every step.** The planner also pulls out what you asked for — format, length, number of questions, difficulty, focus, audience — and each step sees your original request, the overall goal and its own instructions. "Summarize chapter one as bullet points and give me three hard questions" gets bullet points and three hard questions, not a stock paragraph and five medium ones.
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
@@ -130,11 +131,13 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 |---|---|---|
 | `POST` | `/documents` | Upload a file; returns immediately with `status: processing` |
 | `GET` | `/documents`, `/documents/{id}` | List documents / check processing status |
+| `GET` | `/documents/{id}/progress` | Sections, what has been studied and tested, and the suggested next task |
 | `DELETE` | `/documents/{id}` | Delete a document and its chunks |
 | `POST` | `/sessions` | Start a study session on a document |
 | `GET` | `/sessions?document_id=`, `/sessions/{id}` | List sessions / a session with all its turns |
 | `POST` | `/sessions/{id}/messages` | Send a message; the turn's plan, steps and outputs stream as server-sent events |
 | `GET` | `/sessions/{id}/export?format=pdf\|docx&turn=&page_size=A4\|letter` | Download the session, or one turn, as a Word-style PDF or DOCX |
+| `POST` | `/sessions/{id}/quiz-answers` | Grade and store answers to one quiz in the session (`{turn, step, answers}`) |
 | `DELETE` | `/sessions/{id}` | Delete a session |
 | `POST` | `/documents/{id}/ask` | Ask a single question about one document, streamed as server-sent events |
 | `GET` | `/search?q=` | Semantic search across your documents |
@@ -184,6 +187,7 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
 - **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
 - **Old runs stay viewable, not editable.** The browser now has one Study screen per document. Runs made before it are still listed in History, and the `/run` and `/documents/{id}/ask` endpoints remain for API use, but they have no memory between requests.
+- **Section pages are approximate.** Chunks don't record page numbers, so a section's pages are estimated from its position in the text.
 - **Revised answers aren't re-checked.** When `revise` rewrites an answer it's marked unchecked; revised quiz questions get the quote check only.
 - **Auth is optional and currently off** in the deployed build.
 - **No fallback provider.** When a Groq model is rate-limited, the request fails with a "try again" message.

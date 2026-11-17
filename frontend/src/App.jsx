@@ -18,7 +18,7 @@ export default function App() {
   // const [session, setSession] = useState(undefined)
   const [screen, setScreen] = useState("study")
   const [currentRun, setCurrentRun] = useState(null)
-  const [studyDoc, setStudyDoc] = useState(null)
+  const [studyTask, setStudyTask] = useState(null)
 
   // Auth disabled temporarily — uncomment to re-enable
   // useEffect(() => {
@@ -31,8 +31,10 @@ export default function App() {
   // if (session === undefined) return null
   // if (!session) return <Auth />
 
-  function handleStudyDoc(doc) {
-    setStudyDoc(doc)
+  // A suggested task picked in Library opens Study and runs it.
+  function startTask(doc, next) {
+    setStudyTask({ doc, message: next?.message ?? null, session_id: next?.session_id ?? null,
+                   turn: next?.turn ?? null, id: Date.now() })
     setScreen("study")
   }
 
@@ -61,12 +63,12 @@ export default function App() {
       </nav>
 
       <main className="max-w-3xl mx-auto px-6 py-10">
-        {screen === "study" && <Study doc={studyDoc} onPickDoc={setStudyDoc} />}
+        {screen === "study" && <Study task={studyTask} onTask={setStudyTask} />}
         {screen === "results" && (
           <Results run={currentRun} onBack={() => setScreen("history")} />
         )}
         {screen === "library" && (
-          <Library onStudyDoc={handleStudyDoc} />
+          <Library onStartTask={startTask} />
         )}
         {screen === "search" && <Search />}
         {screen === "history" && (

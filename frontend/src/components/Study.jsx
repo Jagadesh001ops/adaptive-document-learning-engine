@@ -136,9 +136,9 @@ function Steps({ steps, now, live }) {
   )
 }
 
-function Turn({ turn, live, now, onAsk, busy, onExport }) {
+function Turn({ turn, live, now, onAsk, busy, onExport, onQuizSubmit }) {
   return (
-    <article className="space-y-4">
+    <article id={turn.turn ? `turn-${turn.turn}` : undefined} className="space-y-4 scroll-mt-6">
       <p className="text-sm text-white bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 whitespace-pre-wrap">
         {turn.message}
       </p>
@@ -146,7 +146,13 @@ function Turn({ turn, live, now, onAsk, busy, onExport }) {
       {live && !turn.steps?.length && <p className="text-xs font-mono text-amber-300">planning…</p>}
       {turn.reply && <p className="text-sm text-gray-200 whitespace-pre-wrap">{turn.reply}</p>}
       {(turn.blocks || []).map((b, i) => (
-        <Block key={i} block={b} onAsk={onAsk} disabled={busy} />
+        <Block
+          key={i}
+          block={b}
+          onAsk={onAsk}
+          disabled={busy}
+          onQuizSubmit={!live && turn.turn && onQuizSubmit ? (step, answers) => onQuizSubmit(turn.turn, step, answers) : null}
+        />
       ))}
       {turn.error && <p className="text-sm text-red-400">{turn.error}</p>}
       {!live && turn.turn && turn.blocks?.length > 0 && (
@@ -163,9 +169,16 @@ function Turn({ turn, live, now, onAsk, busy, onExport }) {
 
 // ── the conversation ────────────────────────────────────────────────────────
 
-function Conversation({ doc, onChangeDoc }) {
+// `start` comes from a suggested task in Library: a session to open, a message to send, or a turn
+// to scroll to.
+function Conversation({ doc, start, onChangeDoc }) {
   const [sessions, setSessions] = useState([])
-  const [sessionId, setSessionId] = useState(null)
+  const [sessionId, setSessionIdState] = useState(null)
+  // send() can run right after a session is opened, before React re-renders, so it reads the
+  // current session from this ref rather than from state.
+  const sessionRef = useRef(null)
+  const startedRef = useRef(false)
+  const setSessionId = id => { sessionRef.current = id; setSessionIdState(id) }
   const [turns, setTurns] = useState([])
   const [live, setLive] = useState(null)
   const [input, setInput] = useState("")
@@ -181,8 +194,10 @@ function Conversation({ doc, onChangeDoc }) {
     setTurns([])
     if (id === null) return
     const res = await apiFetch(`/sessions/${id}`)
-    if (!res.ok) { setError("Couldn't load that session."); return }
-    setTurns((await res.json()).turns)
+    if (!res.ok) { setError("Couldn't load that session."); return [] }
+    const loaded = (await res.json()).turns
+    setTurns(loaded)
+    return loaded
   }
 
   useEffect(() => {
@@ -193,19 +208,45 @@ function Conversation({ doc, onChangeDoc }) {
       .then(async list => {
         if (cancelled) return
         setSessions(list)
-        await openSession(list[0]?.session_id ?? null)
+        const wanted = list.find(x => x.session_id === start?.session_id) ?? list[0]
+        await openSession(wanted?.session_id ?? null)
+        if (cancelled) return
+        setLoading(false)
+        if (startedRef.current) return
+        startedRef.current = true
+        if (start?.message) send(start.message)
+        else if (start?.turn) {
+          setTimeout(() => document.getElementById(`turn-${start.turn}`)?.scrollIntoView({ behavior: "smooth" }), 50)
+        } else setTimeout(() => bottomRef.current?.scrollIntoView({ block: "end" }), 50)
       })
-      .catch(() => setError("Couldn't load your sessions."))
-      .finally(() => !cancelled && setLoading(false))
+      .catch(() => { if (!cancelled) { setError("Couldn't load your sessions."); setLoading(false) } })
     return () => { cancelled = true }
+    // Runs once per document; `start` is fixed for this Conversation (it is keyed by the task).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.document_id])
 
+  // Follow the turn in progress as steps and outputs arrive.
+  const liveKey = live ? `${live.steps.length}-${live.blocks.length}` : null
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
-  }, [turns.length, live?.blocks?.length, live?.steps?.length])
+    if (liveKey) bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+  }, [liveKey])
+
+  async function saveAnswers(turnNo, step, answers) {
+    const res = await apiFetch(`/sessions/${sessionRef.current}/quiz-answers`, {
+      method: "POST", body: JSON.stringify({ turn: turnNo, step, answers }),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.detail || `${res.status}`)
+    }
+    // Keep the answers on the stored turn, so they survive switching sessions in this view.
+    setTurns(ts => ts.map(t => t.turn !== turnNo ? t : {
+      ...t, blocks: t.blocks.map(b => b.type === "quiz" && b.step === step ? { ...b, answers } : b),
+    }))
+  }
 
   async function ensureSession() {
-    if (sessionId !== null) return sessionId
+    if (sessionRef.current !== null) return sessionRef.current
     const res = await apiFetch("/sessions", {
       method: "POST", body: JSON.stringify({ document_id: doc.document_id }),
     })
@@ -274,11 +315,11 @@ function Conversation({ doc, onChangeDoc }) {
   }
 
   async function exportAs(format, turnNo) {
-    if (sessionId === null) return
+    if (sessionRef.current === null) return
     try {
       const qs = new URLSearchParams({ format })
       if (turnNo) qs.set("turn", turnNo)
-      await download(`/sessions/${sessionId}/export?${qs}`, `study.${format}`)
+      await download(`/sessions/${sessionRef.current}/export?${qs}`, `study.${format}`)
     } catch (err) {
       setError(err.message)
     }
@@ -342,7 +383,8 @@ function Conversation({ doc, onChangeDoc }) {
 
       <div className="space-y-12">
         {turns.map((t, i) => (
-          <Turn key={t.turn ?? `x${i}`} turn={t} now={now} onAsk={send} busy={busy} onExport={exportAs} />
+          <Turn key={t.turn ?? `x${i}`} turn={t} now={now} onAsk={send} busy={busy} onExport={exportAs}
+            onQuizSubmit={saveAnswers} />
         ))}
         {live && <Turn turn={live} live now={now} onAsk={send} busy />}
       </div>
@@ -372,7 +414,12 @@ function Conversation({ doc, onChangeDoc }) {
   )
 }
 
-export default function Study({ doc, onPickDoc }) {
-  if (!doc) return <DocPicker onPick={onPickDoc} />
-  return <Conversation key={doc.document_id} doc={doc} onChangeDoc={() => onPickDoc(null)} />
+// task: {doc, message?, session_id?, turn?, id} — `id` changes for each new task so the
+// conversation restarts and runs it.
+export default function Study({ task, onTask }) {
+  if (!task?.doc) return <DocPicker onPick={doc => onTask({ doc, id: Date.now() })} />
+  return (
+    <Conversation key={`${task.doc.document_id}-${task.id}`} doc={task.doc} start={task}
+      onChangeDoc={() => onTask(null)} />
+  )
 }

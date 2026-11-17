@@ -111,7 +111,7 @@ function revisedLabel(block) {
 
 // One output of a study turn. Questions are numbered per quiz, as the planner sees them, so
 // "make question 2 easier" means the question the student sees as 2.
-export function Block({ block, onAsk, disabled }) {
+export function Block({ block, onAsk, disabled, onQuizSubmit }) {
   if (block.type === "note") return <p className="text-sm text-gray-400 italic">{block.text}</p>
   const revised = revisedLabel(block)
   return (
@@ -120,6 +120,7 @@ export function Block({ block, onAsk, disabled }) {
         <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
           {TITLES[block.type] || block.type}
         </h3>
+        {block.section && <span className="text-xs text-gray-600">section {block.section}</span>}
         {block.type === "quiz" && block.difficulty && (
           <span className="text-xs text-gray-600">{block.difficulty}</span>
         )}
@@ -128,7 +129,12 @@ export function Block({ block, onAsk, disabled }) {
       {block.type === "answer" && <Answer block={block} onAsk={onAsk} disabled={disabled} />}
       {(block.type === "summary" || block.type === "concepts") && <Prose text={block.text} />}
       {block.type === "quiz" && (
-        <Quiz items={block.items} changed={block.revised_from?.item ?? null} />
+        <Quiz
+          items={block.items}
+          changed={block.revised_from?.item ?? null}
+          saved={block.answers}
+          onSubmit={onQuizSubmit ? answers => onQuizSubmit(block.step, answers) : null}
+        />
       )}
     </section>
   )

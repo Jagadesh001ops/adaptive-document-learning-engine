@@ -176,6 +176,7 @@ def _process_document(doc_id: int, text: str, page_count: int, char_count: int) 
             d.page_count = page_count
             d.char_count = char_count
             d.error_message = None
+            d.outline_json = None   # the chunks changed, so the section map is rebuilt
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -269,6 +270,21 @@ def list_documents(user_id: str = Depends(get_current_user)):
         db.close()
 
 
+@app.get("/documents/{document_id}/progress")
+def document_progress(document_id: int, user_id: str = Depends(get_current_user)):
+    """The document's sections, what has been studied and tested, and a suggested next task."""
+    from engine.progress import document_progress as progress
+    db = SessionLocal()
+    try:
+        doc = _owned_document(db, document_id, user_id)
+        status = doc.status
+    finally:
+        db.close()
+    if status != "ready":
+        raise HTTPException(status_code=409, detail=f"Document is not ready (status: {status})")
+    return progress(document_id, user_id)
+
+
 @app.get("/documents/{document_id}")
 def get_document(document_id: int, user_id: str = Depends(get_current_user)):
     db = SessionLocal()
@@ -292,6 +308,7 @@ def delete_document(document_id: int, user_id: str = Depends(get_current_user)):
         session_ids = [sid for (sid,) in db.query(StudySession.id).filter_by(document_id=document_id)]
         if session_ids:
             db.query(StudyMessage).filter(StudyMessage.session_id.in_(session_ids)).delete()
+            db.query(QuizAttempt).filter(QuizAttempt.session_id.in_(session_ids)).delete()
             db.query(StudySession).filter(StudySession.id.in_(session_ids)).delete()
         db.delete(doc)
         db.commit()
@@ -369,7 +386,13 @@ class MessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
-_TURN_PRIVATE = ("passages", "sources", "targets", "memory", "models")
+class SessionQuizAnswers(BaseModel):
+    turn: int = Field(ge=1)
+    step: int = Field(ge=0)
+    answers: dict[int, str]     # question number (from 1) -> chosen letter
+
+
+_TURN_PRIVATE = ("passages", "sources", "targets", "memory", "models", "outline")
 
 
 def _owned_document(db, document_id: int, user_id: str) -> Document:
@@ -390,6 +413,18 @@ def _session_turns(db, session_id: int) -> list[dict]:
     rows = (db.query(StudyMessage).filter_by(session_id=session_id, role="assistant")
             .order_by(StudyMessage.id).all())
     return [json.loads(r.content) for r in rows]
+
+
+def _attach_answers(db, session_id: int, turns: list[dict]) -> None:
+    """Add each quiz block's latest answers, so a reopened session shows what was answered."""
+    rows = db.query(QuizAttempt).filter_by(session_id=session_id).order_by(QuizAttempt.id).all()
+    latest: dict = {}
+    for a in rows:
+        latest.setdefault((a.turn, a.step), {})[a.question_idx + 1] = a.chosen_answer
+    for t in turns:
+        for b in t.get("blocks") or []:
+            if b.get("type") == "quiz" and (t.get("turn"), b.get("step")) in latest:
+                b["answers"] = latest[(t.get("turn"), b.get("step"))]
 
 
 def _session_dict(sess: StudySession, turns: int | None = None) -> dict:
@@ -438,6 +473,7 @@ def get_session(session_id: int, user_id: str = Depends(get_current_user)):
         sess = _owned_session(db, session_id, user_id)
         doc = db.query(Document).filter_by(id=sess.document_id).first()
         turns = _session_turns(db, session_id)
+        _attach_answers(db, session_id, turns)
         return {**_session_dict(sess, len(turns)), "document": _doc_dict(doc) if doc else None,
                 "turns": turns}
     finally:
@@ -450,6 +486,7 @@ def delete_session(session_id: int, user_id: str = Depends(get_current_user)):
     try:
         sess = _owned_session(db, session_id, user_id)
         db.query(StudyMessage).filter_by(session_id=session_id).delete()
+        db.query(QuizAttempt).filter_by(session_id=session_id).delete()
         db.delete(sess)
         db.commit()
     finally:
@@ -535,6 +572,45 @@ def send_message(session_id: int, body: MessageRequest, user_id: str = Depends(g
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/sessions/{session_id}/quiz-answers")
+def answer_session_quiz(session_id: int, body: SessionQuizAnswers,
+                        user_id: str = Depends(get_current_user)):
+    """Grade answers to one quiz in the conversation and store them for progress tracking.
+
+    Graded against the stored quiz, not anything the browser sends about correct answers.
+    """
+    db = SessionLocal()
+    try:
+        _owned_session(db, session_id, user_id)
+        turn = next((t for t in _session_turns(db, session_id) if t.get("turn") == body.turn), None)
+        block = next((b for b in (turn or {}).get("blocks") or []
+                      if b.get("type") == "quiz" and b.get("step") == body.step), None)
+        if block is None:
+            raise HTTPException(status_code=404, detail="Quiz not found")
+        items = block.get("items") or []
+        results = []
+        for number, chosen in sorted(body.answers.items()):
+            if not 1 <= number <= len(items):
+                raise HTTPException(status_code=422, detail=f"There's no question {number}")
+            item = items[number - 1]
+            correct = str(item.get("answer", "")).upper()
+            chosen = chosen.strip().upper()[:1]
+            db.add(QuizAttempt(
+                user_id=user_id, session_id=session_id, turn=body.turn, step=body.step,
+                question_idx=number - 1, question_text=str(item.get("question", ""))[:2000],
+                chosen_answer=chosen or "-", correct_answer=correct[:1] or "-",
+                is_correct=int(chosen == correct),
+                chunk_id=(item.get("citation") or {}).get("chunk_id"),
+            ))
+            results.append({"question": number, "chosen": chosen, "correct": correct,
+                            "is_correct": chosen == correct})
+        db.commit()
+    finally:
+        db.close()
+    right = sum(r["is_correct"] for r in results)
+    return {"correct": right, "total": len(results), "results": results}
 
 
 _EXPORT_TYPES = {
