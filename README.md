@@ -11,6 +11,7 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 - **The request shapes every step.** The planner also pulls out what you asked for — format, length, number of questions, difficulty, focus, audience — and each step sees your original request, the overall goal and its own instructions. "Summarize chapter one as bullet points and give me three hard questions" gets bullet points and three hard questions, not a stock paragraph and five medium ones.
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
 - **Quiz verification.** When a plan includes the `verify_quiz` step, the model checks each answer against the retrieved source passages. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
+- **Ask the document anything.** Facts, why something happened, comparisons, what an idea means. Each answer comes with a justification and exact quotes from the passages it used. Before you see it, the quotes are checked against the text and a second model judges whether they really support the answer. If not, the system re-reads the document for what's missing — new passages only — and revises, up to twice. If it still can't support an answer it says so instead of guessing. Every answer ends with follow-up questions you can click.
 - **Semantic search** across your uploaded documents.
 - **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
 
@@ -29,7 +30,7 @@ Requests that don't map cleanly onto these steps fall back to a generic LLM step
 ## Stack
 
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy
-- **LLM:** any model on Groq's OpenAI-compatible API (default `openai/gpt-oss-120b`), set with `LLM_MODEL`
+- **LLM:** models on Groq. Different jobs use different models — free-tier limits are per model, and an answer is better checked by a model other than the one that wrote it (see Configuration)
 - **Embeddings:** `all-MiniLM-L6-v2` via sentence-transformers, running locally — no API calls
 - **Storage:** Postgres 16 + pgvector
 - **Queue:** Redis + ARQ for background ingestion (optional; see `ASYNC_INGEST`)
@@ -90,7 +91,10 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | Variable | Default | Purpose |
 |---|---|---|
 | `GROQ_API_KEY` | — | Required for any LLM call |
-| `LLM_MODEL` | `openai/gpt-oss-120b` | Model used for planning, steps and verification |
+| `LLM_MODEL` | `openai/gpt-oss-120b` | Workflow steps (summaries, quizzes, ...) |
+| `ANSWER_MODEL` | same as `LLM_MODEL` | Answers and revisions in Ask |
+| `CHECK_MODEL` | `qwen/qwen3.8-27b` | Independent check of Ask answers |
+| `PLANNER_MODEL` | `openai/gpt-oss-20b` | Turns a request into a plan |
 | `DATABASE_URL` | — | Postgres connection string (pgvector required) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue for background ingestion; `rediss://` for TLS |
 | `ASYNC_INGEST` | `1` | `0` processes uploads in the API process instead of the ARQ worker — useful on a single small server |
@@ -107,6 +111,7 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `POST` | `/documents` | Upload a file; returns immediately with `status: processing` |
 | `GET` | `/documents`, `/documents/{id}` | List documents / check processing status |
 | `DELETE` | `/documents/{id}` | Delete a document and its chunks |
+| `POST` | `/documents/{id}/ask` | Ask a question about one document, streamed as server-sent events |
 | `GET` | `/search?q=` | Semantic search across your documents |
 | `POST` | `/run` | Run a workflow and return the result |
 | `POST` | `/run/stream` | Same, streamed as server-sent events |
@@ -137,8 +142,7 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 ## Known limitations
 
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
-- **`retrieve_chunks` searches all of a user's documents**, not only the one selected for the run.
 - **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
-- **Runs are stateless.** There's no follow-up ("make question 3 harder"); each request starts fresh.
+- **No memory between requests yet.** Each Ask question and each run is handled on its own, so "and why did that matter?" doesn't know what "that" refers to.
 - **Auth is optional and currently off** in the deployed build.
 - **One model for everything.** There's no fallback provider when the LLM is rate-limited.

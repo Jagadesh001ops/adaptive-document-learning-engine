@@ -6,9 +6,11 @@ import Results from "./components/Results"
 import RunHistory from "./components/RunHistory"
 import Library from "./components/Library"
 import Search from "./components/Search"
+import Ask from "./components/Ask"
 
 const TABS = [
   { id: "submit",  label: "New Run" },
+  { id: "ask",     label: "Ask" },
   { id: "library", label: "Library" },
   { id: "search",  label: "Search" },
   { id: "history", label: "History" },
@@ -19,6 +21,7 @@ export default function App() {
   const [screen, setScreen] = useState("submit")
   const [currentRun, setCurrentRun] = useState(null)
   const [selectedDoc, setSelectedDoc] = useState(null)
+  const [askDoc, setAskDoc] = useState(null)
 
   // Auth disabled temporarily — uncomment to re-enable
   // useEffect(() => {
@@ -39,6 +42,11 @@ export default function App() {
   function handleSelectDoc(doc) {
     setSelectedDoc(doc)
     setScreen("submit")
+  }
+
+  function handleAskDoc(doc) {
+    setAskDoc(doc)
+    setScreen("ask")
   }
 
   return (
@@ -77,8 +85,9 @@ export default function App() {
           <Results run={currentRun} onNewRun={() => setScreen("submit")} />
         )}
         {screen === "library" && (
-          <Library onSelectDoc={handleSelectDoc} />
+          <Library onSelectDoc={handleSelectDoc} onAskDoc={handleAskDoc} />
         )}
+        {screen === "ask" && <Ask doc={askDoc} onPickDoc={setAskDoc} />}
         {screen === "search" && <Search />}
         {screen === "history" && (
           <RunHistory onSelectRun={(run) => { setCurrentRun(run); setScreen("results") }} />

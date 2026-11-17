@@ -249,12 +249,16 @@ class RetrieveChunksNode(BaseNode):
         self.output_key = output_key
         self.document_id = document_id
         self.top_k = top_k
+        self.require_document = False
 
     def _execute(self, state: Dict[str, Any]) -> NodeResult:
         from .retrieval_node import retrieve_chunks
         query = state.get(self.input_key) or state.get("document", "")
         if not query:
             return self.handle_failure(ValueError("No query text found in state"))
+        if self.require_document and self.document_id is None:
+            # Unscoped search would cover every user's documents.
+            return self.handle_failure(ValueError("No document selected to search"))
 
         chunks = retrieve_chunks(
             query=str(query),

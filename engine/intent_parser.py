@@ -5,7 +5,7 @@ load_dotenv()
 import json
 from typing import List, Optional
 
-from .config import LLM_MODEL
+from .config import PLANNER_MODEL
 from .schemas import WorkflowPlan
 
 client = None
@@ -101,7 +101,7 @@ def parse_intent(
         available_nodes = get_registry().describe()
 
     response = get_client().chat.completions.create(
-        model=LLM_MODEL,
+        model=PLANNER_MODEL,
         messages=[
             {"role": "system", "content": _build_system_prompt(available_nodes)},
             {"role": "user",   "content": user_request},

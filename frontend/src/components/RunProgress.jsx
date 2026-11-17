@@ -7,7 +7,7 @@ const RULE = {
   failed: "border-l-red-500",
 }
 
-function Row({ index, name, flow, status, detail, error }) {
+export function StepRow({ index, name, flow, status, detail, error }) {
   return (
     <li className={`border-l-2 ${RULE[status]} px-4 py-2.5`}>
       <div className="flex items-baseline gap-4">
@@ -35,7 +35,7 @@ export function DocumentStatus({ doc, now }) {
 
   return (
     <ol className="border border-gray-800 rounded-lg font-mono text-xs">
-      <Row index={0} name={doc.name} status={status} detail={text} error={doc.error} />
+      <StepRow index={0} name={doc.name} status={status} detail={text} error={doc.error} />
     </ol>
   )
 }
@@ -50,9 +50,9 @@ export function RunProgress({ pipeline, now }) {
     <div className="space-y-2">
       {pipeline.goal && <p className="text-xs text-gray-400">{pipeline.goal}</p>}
       <ol className="border border-gray-800 rounded-lg divide-y divide-gray-800 font-mono text-xs">
-        <Row index={0} name="plan" status={planning ? "running" : "done"} detail={planDetail} />
+        <StepRow index={0} name="plan" status={planning ? "running" : "done"} detail={planDetail} />
         {pipeline.steps.map((s, i) => (
-          <Row
+          <StepRow
             key={s.name}
             index={i + 1}
             name={s.name}

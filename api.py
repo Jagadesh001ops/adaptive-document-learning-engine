@@ -24,7 +24,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -43,7 +43,7 @@ from engine.database import (
 from engine.execution_engine import ExecutionEngine
 from engine.ingestion import ExtractionError, IngestionError, ingest
 from engine.intent_parser import parse_intent
-from engine.llm_nodes import StepContext, build_node_for_step
+from engine.llm_nodes import RetrieveChunksNode, StepContext, build_node_for_step
 
 
 @contextlib.asynccontextmanager
@@ -286,6 +286,51 @@ def delete_document(document_id: int, user_id: str = Depends(get_current_user)):
         db.commit()
     finally:
         db.close()
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/documents/{document_id}/ask")
+def ask_document(document_id: int, body: AskRequest, user_id: str = Depends(get_current_user)):
+    """Answer a question about one document, streaming each step as server-sent events."""
+    from engine.qa import ModelBusy, answer_question
+
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter_by(id=document_id, user_id=user_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if doc.status != "ready":
+            raise HTTPException(status_code=409, detail=f"Document is not ready (status: {doc.status})")
+    finally:
+        db.close()
+
+    def event_generator():
+        q: queue.Queue = queue.Queue()
+
+        def emit(kind, payload):
+            q.put({"type": kind, **payload})
+
+        def run():
+            try:
+                q.put({"type": "done", **answer_question(body.question, document_id, emit)})
+            except ModelBusy as exc:
+                q.put({"type": "error", "message": str(exc)})
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).exception("ask failed for document %d", document_id)
+                q.put({"type": "error", "message": f"Couldn't answer: {exc}"})
+            finally:
+                q.put(None)
+
+        threading.Thread(target=run, daemon=True).start()
+        while (event := q.get()) is not None:
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _doc_dict(d: Document) -> dict:
@@ -639,6 +684,9 @@ def _build_engine(plan, body: RunRequest) -> ExecutionEngine:
         )
         if hasattr(node, "_difficulty"):
             node._difficulty = body.difficulty or "medium"
+        if isinstance(node, RetrieveChunksNode):
+            node.document_id = body.document_id
+            node.require_document = True
         if hasattr(node, "set_context"):
             node.set_context(StepContext(request=body.request, goal=plan.goal,
                                          instructions=step.description, brief=plan.brief))
