@@ -1,6 +1,5 @@
 import { useState } from 'react'
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { apiFetch } from '../lib/api'
 
 function renderValue(val) {
   if (val === null || val === undefined) return null
@@ -113,7 +112,7 @@ export default function Results({ run, onNewRun }) {
   const downloadExport = async (format) => {
     setExporting(format)
     try {
-      const res = await fetch(`${API}/runs/${run.run_id}/export/${format}`)
+      const res = await apiFetch(`/runs/${run.run_id}/export/${format}`)
       if (!res.ok) throw new Error(await res.text())
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
