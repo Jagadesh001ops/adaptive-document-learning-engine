@@ -12,7 +12,7 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
 - **Quiz verification.** When a plan includes the `verify_quiz` step, the model checks each answer against the retrieved source passages. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
 - **Ask the document anything.** Facts, why something happened, comparisons, what an idea means. Each answer comes with a justification and exact quotes from the passages it used. Before you see it, the quotes are checked against the text and a second model judges whether they really support the answer. If not, the system re-reads the document for what's missing — new passages only — and revises, up to twice. If it still can't support an answer it says so instead of guessing. Every answer ends with follow-up questions you can click.
-- **Claude as supervisor.** Every Ask and every run is logged in full. Once an hour, a job sends new logs to Claude through the Message Batches API (half price, asynchronous), and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role. `GET /reviews/summary` aggregates the results per model.
+- **Claude as supervisor.** Every Ask and every run is logged in full. Running `/review-logs` in Claude Code fetches the unreviewed logs, and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role, then saves the reviews back to the app. `GET /admin/reviews/summary` aggregates the results per model.
 - **Semantic search** across your uploaded documents.
 - **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
 
@@ -96,10 +96,7 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `ANSWER_MODEL` | same as `LLM_MODEL` | Answers and revisions in Ask |
 | `CHECK_MODEL` | `qwen/qwen3.8-27b` | Independent check of Ask answers |
 | `PLANNER_MODEL` | `openai/gpt-oss-20b` | Turns a request into a plan |
-| `ANTHROPIC_API_KEY` | — | Enables the Claude review job. Without it, logs are kept but not reviewed |
-| `REVIEW_MODEL` | `claude-opus-5-5` | Model that reviews logged interactions |
-| `REVIEW_EFFORT` | `medium` | How hard the reviewer thinks (`low` … `max`) |
-| `REVIEW_BATCH_LIMIT` | `500` | Max logs sent per review batch |
+| `ADMIN_TOKEN` | — | Protects the `/admin/*` review routes; they don't exist until it's set |
 | `DATABASE_URL` | — | Postgres connection string (pgvector required) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue for background ingestion; `rediss://` for TLS |
 | `ASYNC_INGEST` | `1` | `0` processes uploads in the API process instead of the ARQ worker — useful on a single small server |
@@ -125,10 +122,24 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `POST` | `/quiz/attempt` | Submit quiz answers for scoring |
 | `GET` | `/quiz/history` | Past quiz scores |
 | `GET` | `/health` | Checks the database and Redis; 503 if either is down |
-| `GET` | `/reviews/summary` | Supervisor review results: rates per model, problems by role, latest advice |
+| `GET` | `/admin/logs` | Unreviewed interaction logs with full records (needs `X-Admin-Token`) |
+| `POST` | `/admin/logs/{id}/review` | Save a supervisor review (needs `X-Admin-Token`) |
+| `GET` | `/admin/reviews/summary` | Review results per model, problems by role, latest lessons (needs `X-Admin-Token`) |
 | `GET` | `/metrics` | Prometheus metrics |
 
 Interactive docs are at `/docs` when the server is running.
+
+## Reviewing logs with Claude
+
+Set `ADMIN_TOKEN` on the server, then locally:
+
+```bash
+export ALE_ADMIN_TOKEN=<same token>
+claude          # in this repo
+/review-logs    # or /review-logs 50 to review more at once
+```
+
+Claude fetches pending logs, reviews each against the source it was based on, posts the reviews to `/admin/logs/{id}/review`, and reports the main problems and lessons per role. The rubric lives in `.claude/commands/review-logs.md`.
 
 ## Tests
 
@@ -143,8 +154,6 @@ Integration tests run against a real Postgres and are skipped when `DATABASE_URL
 
 The production image builds the React app and serves it from FastAPI, so the frontend and API share one origin and one container. On merge to `main`, GitHub Actions runs lint, tests and a frontend build, then smoke tests, waits for manual approval, and deploys over SSH: pull, rebuild the image, restart the container.
 
-The deploy also installs an hourly cron job on the VM that runs the review job (`docker exec ai-engine python -m engine.reviewer`); it does nothing until `ANTHROPIC_API_KEY` is set.
-
 It currently runs on a single small VM behind [Caddy](https://caddyserver.com/), which handles HTTPS (Let's Encrypt) and forwards to the app on `localhost:8000`; the app port itself isn't exposed publicly. Postgres is on Supabase and Redis on Upstash. If you deploy to a machine with around 1 GB of RAM, add swap first — the image build won't survive without it.
 
 ## Known limitations
@@ -154,5 +163,5 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 - **No memory between requests yet.** Each Ask question and each run is handled on its own, so "and why did that matter?" doesn't know what "that" refers to.
 - **Auth is optional and currently off** in the deployed build.
 - **No fallback provider.** When a Groq model is rate-limited, the request fails with a "try again" message.
-- **Reviews leave the server.** The review job sends logged questions, answers and document passages to Anthropic. Fine for study material; think twice before using it with private documents.
+- **Reviews read real user content.** `/review-logs` pulls logged questions, answers and document passages into your Claude Code session. Fine for study material; think twice once real users upload private documents.
 - **Claude's advice isn't applied yet.** Lessons are collected and shown in the summary, but not yet fed back into the other models' prompts.

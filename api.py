@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import queue
+import secrets
 import threading
 from typing import List, Optional
 
@@ -16,6 +17,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -45,6 +47,7 @@ from engine.execution_engine import ExecutionEngine
 from engine.ingestion import ExtractionError, IngestionError, ingest
 from engine.intent_parser import parse_intent
 from engine.llm_nodes import RetrieveChunksNode, StepContext, build_node_for_step
+from engine.reviews import Review
 
 
 @contextlib.asynccontextmanager
@@ -479,11 +482,38 @@ def _resolve_document_text(body: RunRequest, user_id: str) -> str:
     return _join_chunks(chunks)[:MAX_DOC_CHARS]
 
 
-@app.get("/reviews/summary")
-def reviews_summary(user_id: str = Depends(get_current_user)):
-    """How the supervisor model rated logged interactions, per model, plus its latest advice."""
-    from engine.reviewer import summarize
-    return summarize(user_id)
+# ─── Supervisor review (admin) ────────────────────────────────────────────────
+# Logs hold users' questions and document text, so these routes need ADMIN_TOKEN.
+# With no ADMIN_TOKEN configured they don't exist.
+
+def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    expected = os.getenv("ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
+@app.get("/admin/logs", dependencies=[Depends(require_admin)])
+def admin_pending_logs(limit: int = Query(default=20, ge=1, le=100)):
+    """Logged interactions that haven't been reviewed yet, oldest first, with full records."""
+    from engine.reviews import count_pending, pending_logs
+    return {"pending_total": count_pending(), "logs": pending_logs(limit)}
+
+
+@app.post("/admin/logs/{log_id}/review", dependencies=[Depends(require_admin)])
+def admin_save_review(log_id: int, review: Review, reviewer: str = Query(default="claude-code")):
+    from engine.reviews import save_review
+    if not save_review(log_id, review, reviewer):
+        raise HTTPException(status_code=404, detail="Log not found")
+    return {"id": log_id, "review_status": "reviewed"}
+
+
+@app.get("/admin/reviews/summary", dependencies=[Depends(require_admin)])
+def admin_reviews_summary():
+    """Review results per model, problems by role, and the latest lessons."""
+    from engine.reviews import summarize
+    return summarize()
 
 
 def _log_run(user_id, body: RunRequest, plan, traces, output, document_text, run_id):

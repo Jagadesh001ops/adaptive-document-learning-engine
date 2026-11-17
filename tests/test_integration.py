@@ -470,13 +470,6 @@ def test_run_is_logged_with_plan_steps_output_and_source():
     assert record["steps"][0]["success"] is True
 
 
-def test_reviews_summary_endpoint():
-    client.post("/run", json={"document": "x", "request": "r"})  # may fail; summary must still work
-    res = client.get("/reviews/summary")
-    assert res.status_code == 200
-    assert {"logs", "status", "by_kind_and_model", "issues_by_role", "recent_advice"} <= res.json().keys()
-
-
 # ── Workflow retrieval is limited to the run's document ───────────────────────
 
 def _retrieval_plan():

@@ -8,7 +8,9 @@ __pycache__/
 *.docx
 *.txt
 .agents/
-.claude/
+.claude/*
+!.claude/commands/
+review-logs/
 .pytest_cache/
 .vscode/
 reports/

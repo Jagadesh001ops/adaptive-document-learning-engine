@@ -132,7 +132,6 @@ jobs:
           docker rm -f ai-engine || true
           docker run -d --name ai-engine --env-file ~/.env -p 127.0.0.1:8000:8000 --restart unless-stopped ai-engine
           docker ps --filter name=ai-engine
-          { crontab -l 2>/dev/null | grep -v engine.reviewer || true; echo '0 * * * * docker exec ai-engine python -m engine.reviewer >> /tmp/reviewer.log 2>&1'; } | crontab -
           echo Deploy complete"
 
           ssh -i "$KEY_FILE" \
