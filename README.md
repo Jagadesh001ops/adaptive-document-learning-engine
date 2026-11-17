@@ -8,8 +8,11 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 
 - **Document library.** Upload PDF, TXT or Markdown files (up to 25 MB, 10 per user). Text is extracted, split into overlapping ~600-token chunks, embedded, and stored in Postgres with pgvector. Processing runs in the background and the UI shows its progress.
 - **Request → plan → run.** Your request is turned into an ordered list of steps. Each step reads one value from a shared state and writes another, e.g. `document → summary → quiz`.
+- **The request shapes every step.** The planner also pulls out what you asked for — format, length, number of questions, difficulty, focus, audience — and each step sees your original request, the overall goal and its own instructions. "Summarize chapter one as bullet points and give me three hard questions" gets bullet points and three hard questions, not a stock paragraph and five medium ones.
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
-- **Verified quizzes.** Generated questions go through a second pass where the model checks each answer against the source. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
+- **Quiz verification.** When a plan includes the `verify_quiz` step, the model checks each answer against the retrieved source passages. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
+- **Ask the document anything.** Facts, why something happened, comparisons, what an idea means. Each answer comes with a justification and exact quotes from the passages it used. Before you see it, the quotes are checked against the text and a second model judges whether they really support the answer. If not, the system re-reads the document for what's missing — new passages only — and revises, up to twice. If it still can't support an answer it says so instead of guessing. Every answer ends with follow-up questions you can click.
+- **Claude as supervisor.** Every Ask and every run is logged in full. Running `/review-logs` in Claude Code fetches the unreviewed logs, and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role, then saves the reviews back to the app. `GET /admin/reviews/summary` aggregates the results per model.
 - **Semantic search** across your uploaded documents.
 - **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
 
@@ -17,9 +20,9 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 
 | Step | Does |
 |---|---|
-| `summarize` | Condenses the text into a short paragraph of the main ideas |
-| `extract_concepts` | Pulls out the five most important concepts |
-| `generate_quiz` | Writes multiple-choice questions with explanations (easy / medium / hard) |
+| `summarize` | Condenses the text to its main ideas (a short paragraph unless you ask otherwise) |
+| `extract_concepts` | Pulls out the key concepts (five unless you ask for a different number) |
+| `generate_quiz` | Writes multiple-choice questions with explanations, grounded in the source (five at medium difficulty unless you ask otherwise) |
 | `retrieve_chunks` | Embeds the request and fetches the most relevant chunks from the index |
 | `verify_quiz` | Checks quiz answers against the source and regenerates failures |
 
@@ -28,7 +31,7 @@ Requests that don't map cleanly onto these steps fall back to a generic LLM step
 ## Stack
 
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy
-- **LLM:** any model on Groq's OpenAI-compatible API (default `openai/gpt-oss-120b`), set with `LLM_MODEL`
+- **LLM:** models on Groq. Different jobs use different models — free-tier limits are per model, and an answer is better checked by a model other than the one that wrote it (see Configuration)
 - **Embeddings:** `all-MiniLM-L6-v2` via sentence-transformers, running locally — no API calls
 - **Storage:** Postgres 16 + pgvector
 - **Queue:** Redis + ARQ for background ingestion (optional; see `ASYNC_INGEST`)
@@ -89,7 +92,11 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | Variable | Default | Purpose |
 |---|---|---|
 | `GROQ_API_KEY` | — | Required for any LLM call |
-| `LLM_MODEL` | `openai/gpt-oss-120b` | Model used for planning, steps and verification |
+| `LLM_MODEL` | `openai/gpt-oss-120b` | Workflow steps (summaries, quizzes, ...) |
+| `ANSWER_MODEL` | same as `LLM_MODEL` | Answers and revisions in Ask |
+| `CHECK_MODEL` | `qwen/qwen3.8-27b` | Independent check of Ask answers |
+| `PLANNER_MODEL` | `openai/gpt-oss-20b` | Turns a request into a plan |
+| `ADMIN_TOKEN` | — | Protects the `/admin/*` review routes; they don't exist until it's set |
 | `DATABASE_URL` | — | Postgres connection string (pgvector required) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue for background ingestion; `rediss://` for TLS |
 | `ASYNC_INGEST` | `1` | `0` processes uploads in the API process instead of the ARQ worker — useful on a single small server |
@@ -106,6 +113,7 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `POST` | `/documents` | Upload a file; returns immediately with `status: processing` |
 | `GET` | `/documents`, `/documents/{id}` | List documents / check processing status |
 | `DELETE` | `/documents/{id}` | Delete a document and its chunks |
+| `POST` | `/documents/{id}/ask` | Ask a question about one document, streamed as server-sent events |
 | `GET` | `/search?q=` | Semantic search across your documents |
 | `POST` | `/run` | Run a workflow and return the result |
 | `POST` | `/run/stream` | Same, streamed as server-sent events |
@@ -114,9 +122,24 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `POST` | `/quiz/attempt` | Submit quiz answers for scoring |
 | `GET` | `/quiz/history` | Past quiz scores |
 | `GET` | `/health` | Checks the database and Redis; 503 if either is down |
+| `GET` | `/admin/logs` | Unreviewed interaction logs with full records (needs `X-Admin-Token`) |
+| `POST` | `/admin/logs/{id}/review` | Save a supervisor review (needs `X-Admin-Token`) |
+| `GET` | `/admin/reviews/summary` | Review results per model, problems by role, latest lessons (needs `X-Admin-Token`) |
 | `GET` | `/metrics` | Prometheus metrics |
 
 Interactive docs are at `/docs` when the server is running.
+
+## Reviewing logs with Claude
+
+Set `ADMIN_TOKEN` on the server, then locally:
+
+```bash
+export ALE_ADMIN_TOKEN=<same token>
+claude          # in this repo
+/review-logs    # or /review-logs 50 to review more at once
+```
+
+Claude fetches pending logs, reviews each against the source it was based on, posts the reviews to `/admin/logs/{id}/review`, and reports the main problems and lessons per role. The rubric lives in `.claude/commands/review-logs.md`.
 
 ## Tests
 
@@ -136,7 +159,9 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 ## Known limitations
 
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
-- **`retrieve_chunks` searches all of a user's documents**, not only the one selected for the run.
-- **Runs are stateless.** There's no follow-up ("make question 3 harder"); each request starts fresh.
+- **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
+- **No memory between requests yet.** Each Ask question and each run is handled on its own, so "and why did that matter?" doesn't know what "that" refers to.
 - **Auth is optional and currently off** in the deployed build.
-- **One model for everything.** There's no fallback provider when the LLM is rate-limited.
+- **No fallback provider.** When a Groq model is rate-limited, the request fails with a "try again" message.
+- **Reviews read real user content.** `/review-logs` pulls logged questions, answers and document passages into your Claude Code session. Fine for study material; think twice once real users upload private documents.
+- **Claude's advice isn't applied yet.** Lessons are collected and shown in the summary, but not yet fed back into the other models' prompts.

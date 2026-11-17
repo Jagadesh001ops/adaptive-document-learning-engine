@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import queue
+import secrets
 import threading
 from typing import List, Optional
 
@@ -16,6 +17,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -24,7 +26,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -38,12 +40,14 @@ from engine.database import (
     WorkflowRun,
     get_or_create_document,
     init_db,
+    record_interaction,
     store_chunks,
 )
 from engine.execution_engine import ExecutionEngine
 from engine.ingestion import ExtractionError, IngestionError, ingest
 from engine.intent_parser import parse_intent
-from engine.llm_nodes import build_node_for_step
+from engine.llm_nodes import RetrieveChunksNode, StepContext, build_node_for_step
+from engine.reviews import Review
 
 
 @contextlib.asynccontextmanager
@@ -288,6 +292,57 @@ def delete_document(document_id: int, user_id: str = Depends(get_current_user)):
         db.close()
 
 
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/documents/{document_id}/ask")
+def ask_document(document_id: int, body: AskRequest, user_id: str = Depends(get_current_user)):
+    """Answer a question about one document, streaming each step as server-sent events."""
+    from engine.qa import ModelBusy, answer_question
+
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter_by(id=document_id, user_id=user_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if doc.status != "ready":
+            raise HTTPException(status_code=409, detail=f"Document is not ready (status: {doc.status})")
+    finally:
+        db.close()
+
+    def event_generator():
+        q: queue.Queue = queue.Queue()
+        steps: list = []
+
+        def emit(kind, payload):
+            if kind == "step":
+                steps.append(payload)
+            q.put({"type": kind, **payload})
+
+        def run():
+            try:
+                result = answer_question(body.question, document_id, emit)
+                record_interaction(user_id=user_id, kind="ask", request=body.question,
+                                   document_id=document_id, record={**result, "steps": steps})
+                q.put({"type": "done", **{k: v for k, v in result.items() if k != "passages"}})
+            except ModelBusy as exc:
+                q.put({"type": "error", "message": str(exc)})
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).exception("ask failed for document %d", document_id)
+                q.put({"type": "error", "message": f"Couldn't answer: {exc}"})
+            finally:
+                q.put(None)
+
+        threading.Thread(target=run, daemon=True).start()
+        while (event := q.get()) is not None:
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 def _doc_dict(d: Document) -> dict:
     return {
         "document_id": d.id, "filename": d.filename,
@@ -427,6 +482,60 @@ def _resolve_document_text(body: RunRequest, user_id: str) -> str:
     return _join_chunks(chunks)[:MAX_DOC_CHARS]
 
 
+# ─── Supervisor review (admin) ────────────────────────────────────────────────
+# Logs hold users' questions and document text, so these routes need ADMIN_TOKEN.
+# With no ADMIN_TOKEN configured they don't exist.
+
+def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    expected = os.getenv("ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
+@app.get("/admin/logs", dependencies=[Depends(require_admin)])
+def admin_pending_logs(limit: int = Query(default=20, ge=1, le=100)):
+    """Logged interactions that haven't been reviewed yet, oldest first, with full records."""
+    from engine.reviews import count_pending, pending_logs
+    return {"pending_total": count_pending(), "logs": pending_logs(limit)}
+
+
+@app.post("/admin/logs/{log_id}/review", dependencies=[Depends(require_admin)])
+def admin_save_review(log_id: int, review: Review, reviewer: str = Query(default="claude-code")):
+    from engine.reviews import save_review
+    if not save_review(log_id, review, reviewer):
+        raise HTTPException(status_code=404, detail="Log not found")
+    return {"id": log_id, "review_status": "reviewed"}
+
+
+@app.get("/admin/reviews/summary", dependencies=[Depends(require_admin)])
+def admin_reviews_summary():
+    """Review results per model, problems by role, and the latest lessons."""
+    from engine.reviews import summarize
+    return summarize()
+
+
+def _log_run(user_id, body: RunRequest, plan, traces, output, document_text, run_id):
+    from engine.config import LLM_MODEL, PLANNER_MODEL
+    record_interaction(
+        user_id=user_id, kind="run", request=body.request, document_id=body.document_id,
+        record={
+            "run_id": run_id,
+            "goal": plan.goal,
+            "brief": plan.brief.preferences(),
+            "plan": [{"name": s.name, "instructions": s.description,
+                      "input_key": s.input_key, "output_key": s.output_key} for s in plan.steps],
+            "steps": [{"name": t.name, "success": t.success, "error": t.error,
+                       "time_ms": round(t.execution_time_ms),
+                       "tokens": t.input_tokens + t.output_tokens} for t in traces],
+            "output": output,
+            "source": document_text,
+            "models": {"planner": PLANNER_MODEL, "steps": LLM_MODEL},
+        },
+    )
+
+
 @app.post("/run", response_model=RunResponse)
 def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
                  db: Session = Depends(get_db)):
@@ -452,6 +561,7 @@ def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
     db.add(run)
     db.commit()
     db.refresh(run)
+    _log_run(user_id, body, plan, traces, output, document_text, run.id)
 
     return RunResponse(run_id=run.id, goal=plan.goal,
                        steps=[StepResult(**s) for s in step_results],
@@ -467,7 +577,7 @@ def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_use
             plan = parse_intent(body.request)
             step_metas = [{"name": s.name, "input_key": s.input_key, "output_key": s.output_key}
                           for s in plan.steps]
-            yield f"data: {json.dumps({'type': 'plan', 'goal': plan.goal, 'steps': step_metas, 'scope': plan.scope, 'too_broad': plan.too_broad})}\n\n"
+            yield f"data: {json.dumps({'type': 'plan', 'goal': plan.goal, 'steps': step_metas, 'scope': plan.scope, 'too_broad': plan.too_broad, 'brief': plan.brief.preferences()})}\n\n"
 
             if plan.too_broad:
                 yield f"data: {json.dumps({'type': 'error', 'message': plan.too_broad_reason or 'Request too broad'})}\n\n"
@@ -530,6 +640,7 @@ def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_use
                 run_id = run.id
             finally:
                 db.close()
+            _log_run(user_id, body, plan, traces, output, document_text, run_id)
 
             yield f"data: {json.dumps({'type': 'done', 'run_id': run_id, 'goal': plan.goal, 'steps': step_metas, 'output': output, 'total_tokens': total_tokens, 'total_time_ms': total_time_ms}, default=str)}\n\n"
 
@@ -637,9 +748,14 @@ def _build_engine(plan, body: RunRequest) -> ExecutionEngine:
             name=step.name, description=step.description,
             input_key=step.input_key, output_key=step.output_key,
         )
-        # Inject difficulty into quiz nodes (Day 15)
         if hasattr(node, "_difficulty"):
             node._difficulty = body.difficulty or "medium"
+        if isinstance(node, RetrieveChunksNode):
+            node.document_id = body.document_id
+            node.require_document = True
+        if hasattr(node, "set_context"):
+            node.set_context(StepContext(request=body.request, goal=plan.goal,
+                                         instructions=step.description, brief=plan.brief))
         eng.register_node(step.name, node)
     return eng
 

@@ -2,11 +2,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from .config import LLM_MODEL
 from .nodes import BaseNode, NodeResult
 from .registry import NodeEntry, NodeRegistry, _set_registry
+from .schemas import RequestBrief
 
 client = None
 
@@ -19,6 +21,15 @@ def get_client():
     return client
 
 
+@dataclass
+class StepContext:
+    """What the user asked for, given to every step so its output fits the request."""
+    request: str = ""
+    goal: str = ""
+    instructions: str = ""
+    brief: RequestBrief = field(default_factory=RequestBrief)
+
+
 # ─── Generic fallback node ────────────────────────────────────────────────────
 
 class LLMNode(BaseNode):
@@ -28,13 +39,39 @@ class LLMNode(BaseNode):
         super().__init__(name=name, description=description)
         self.input_key = input_key
         self.output_key = output_key
+        self.context = StepContext()
+
+    def set_context(self, context: StepContext) -> None:
+        self.context = context
+
+    def _context_block(self) -> str:
+        ctx = self.context
+        lines = []
+        if ctx.request:
+            lines.append(f'The user\'s request: "{ctx.request}"')
+        if ctx.goal:
+            lines.append(f"Overall goal: {ctx.goal}")
+        if ctx.instructions and ctx.instructions != self.description:
+            lines.append(f"Your part: {ctx.instructions}")
+        prefs = ctx.brief.preferences()
+        if prefs:
+            lines.append("Follow these preferences where they apply to your output:")
+            lines.extend(f"- {k}: {v}" for k, v in prefs.items())
+        if lines:
+            # Earlier/later steps handle the rest of a multi-part request.
+            lines.append("Do only your part of the request.")
+        return "\n".join(lines)
+
+    def _system_prompt(self, role: str) -> str:
+        block = self._context_block()
+        return f"{role}\n\n{block}" if block else role
 
     def _build_messages(self, state: Dict[str, Any]):
         text = state.get(self.input_key)
         if not text:
             return None, None
         return (
-            f"You are an expert assistant. Your job: {self.description}. Be concise and clear.",
+            self._system_prompt(f"You are an expert assistant. Your job: {self.description}. Be clear."),
             str(text),
         )
 
@@ -69,7 +106,10 @@ class SummarizeNode(LLMNode):
     def __init__(self, name: str, input_key: str, output_key: str):
         super().__init__(
             name=name,
-            description="Summarize the given text into a clear, concise paragraph capturing only the main ideas.",
+            description=(
+                "Summarize the given text, capturing only the main ideas. Use one concise "
+                "paragraph unless the user asked for a different format or length"
+            ),
             input_key=input_key,
             output_key=output_key,
         )
@@ -80,8 +120,9 @@ class ExtractConceptsNode(LLMNode):
         super().__init__(
             name=name,
             description=(
-                "Extract the 5 most important concepts from the text. "
-                "Return a numbered list, one concept per line with a brief explanation."
+                "Extract the most important concepts from the text (5 unless the user asked "
+                "for a different number). Return a numbered list, one concept per line with a "
+                "brief explanation, unless the user asked for a different format"
             ),
             input_key=input_key,
             output_key=output_key,
@@ -91,13 +132,27 @@ class ExtractConceptsNode(LLMNode):
 class GenerateQuizNode(LLMNode):
     """Generates quiz items as structured JSON, attaching citations from retrieved_chunks."""
 
+    DEFAULT_COUNT = 5
+    _LEVELS = {
+        "easy": "recall of facts stated directly in the text",
+        "medium": "understanding of ideas and how they connect",
+        "hard": "applying or inferring from the text, with plausible distractors",
+    }
+
     def __init__(self, name: str, input_key: str, output_key: str):
         super().__init__(
             name=name,
-            description="Create 5 multiple-choice quiz questions based on the given content.",
+            description="Create multiple-choice quiz questions based on the given content.",
             input_key=input_key,
             output_key=output_key,
         )
+        self._difficulty = None  # UI-selected level; the user's own request takes precedence
+
+    def _settings(self):
+        brief = self.context.brief
+        count = brief.count or self.DEFAULT_COUNT
+        difficulty = brief.difficulty or self._difficulty or "medium"
+        return count, difficulty if difficulty in self._LEVELS else "medium"
 
     def _build_messages(self, state: Dict[str, Any]):
         text = state.get(self.input_key)
@@ -114,10 +169,13 @@ class GenerateQuizNode(LLMNode):
         else:
             return None, None
 
-        system = (
+        count, difficulty = self._settings()
+        role = (
             "You are an expert quiz writer. Given source material (with chunk IDs), "
-            "generate exactly 5 multiple-choice questions. For each question cite the "
-            "chunk_id of the chunk it came from. "
+            f"generate exactly {count} multiple-choice questions at {difficulty} difficulty "
+            f"({self._LEVELS[difficulty]}). Every question and answer must be supported by "
+            "the source material — do not rely on outside knowledge. For each question cite "
+            "the chunk_id of the chunk it came from. "
             "Return ONLY a JSON array — no extra text:\n"
             '[\n'
             '  {\n'
@@ -129,7 +187,7 @@ class GenerateQuizNode(LLMNode):
             '  }\n'
             ']'
         )
-        return system, source
+        return self._system_prompt(role), source
 
     def _execute(self, state: Dict[str, Any]) -> NodeResult:
         system_msg, user_msg = self._build_messages(state)
@@ -191,12 +249,16 @@ class RetrieveChunksNode(BaseNode):
         self.output_key = output_key
         self.document_id = document_id
         self.top_k = top_k
+        self.require_document = False
 
     def _execute(self, state: Dict[str, Any]) -> NodeResult:
         from .retrieval_node import retrieve_chunks
         query = state.get(self.input_key) or state.get("document", "")
         if not query:
             return self.handle_failure(ValueError("No query text found in state"))
+        if self.require_document and self.document_id is None:
+            # Unscoped search would cover every user's documents.
+            return self.handle_failure(ValueError("No document selected to search"))
 
         chunks = retrieve_chunks(
             query=str(query),

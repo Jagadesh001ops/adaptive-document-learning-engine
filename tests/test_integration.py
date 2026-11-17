@@ -63,6 +63,8 @@ def clean_tables():
     yield
     db = SessionLocal()
     try:
+        from engine.database import InteractionLog
+        db.query(InteractionLog).filter_by(user_id="dev-user").delete()
         db.query(QuizAttempt).filter_by(user_id="dev-user").delete()
         db.query(WorkflowRun).filter_by(user_id="dev-user").delete()
         db.query(Document).filter_by(user_id="dev-user").delete()
@@ -338,6 +340,166 @@ def test_search_no_docs_returns_empty():
     res = client.get("/search", params={"q": "anything"})
     assert res.status_code == 200
     assert res.json()["results"] == []
+
+
+# ── Request context reaches steps ─────────────────────────────────────────────
+
+def test_run_passes_request_context_to_steps():
+    from engine.schemas import RequestBrief
+    plan = _make_plan()
+    plan.brief = RequestBrief(format="bullet points", count=3)
+    node = _fake_node()
+    with (
+        patch("api.parse_intent", return_value=plan),
+        patch("api.build_node_for_step", return_value=node),
+    ):
+        res = client.post("/run", json={"document": "Text.", "request": "bullet summary, 3 questions"})
+    assert res.status_code == 200, res.text
+    ctx = node.set_context.call_args[0][0]
+    assert ctx.request == "bullet summary, 3 questions"
+    assert ctx.goal == "Summarise" and ctx.instructions == "Summarise"
+    assert ctx.brief.preferences() == {"format": "bullet points", "count": 3}
+
+
+# ── Document Q&A endpoint ─────────────────────────────────────────────────────
+
+def _sse_events(res):
+    import json as _json
+    return [_json.loads(line[6:]) for line in res.text.splitlines() if line.startswith("data: ")]
+
+
+def test_ask_streams_steps_and_final_answer():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+
+    def fake_answer(question, document_id, emit):
+        emit("step_start", {"name": "answer"})
+        emit("step", {"name": "answer", "success": True, "time_ms": 5, "tokens": 9})
+        return {"answer": f"About {question}", "verification": "checked", "document": document_id}
+
+    try:
+        with patch("engine.qa.answer_question", side_effect=fake_answer):
+            res = client.post(f"/documents/{doc_id}/ask", json={"question": "greetings"})
+        assert res.status_code == 200
+        events = _sse_events(res)
+        assert [e["type"] for e in events] == ["step_start", "step", "done"]
+        assert events[-1]["answer"] == "About greetings" and events[-1]["document"] == doc_id
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_ask_reports_rate_limit_as_error_event():
+    from engine.qa import ModelBusy
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        with patch("engine.qa.answer_question", side_effect=ModelBusy("The model is busy")):
+            events = _sse_events(client.post(f"/documents/{doc_id}/ask", json={"question": "q"}))
+        assert events == [{"type": "error", "message": "The model is busy"}]
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_ask_rejects_other_users_documents_and_unready_ones():
+    other = _library_doc(user_id="someone-else", chunks=[(0, 5, "Hello")])
+    try:
+        assert client.post(f"/documents/{other}/ask", json={"question": "q"}).status_code == 404
+    finally:
+        _cleanup_doc(other)
+
+    res = client.post("/documents", files=_txt_file("unready.txt", "Processing later."))
+    doc_id = res.json()["document_id"]
+    db = SessionLocal()
+    try:
+        db.query(Document).filter_by(id=doc_id).update({"status": "processing"})
+        db.commit()
+    finally:
+        db.close()
+    assert client.post(f"/documents/{doc_id}/ask", json={"question": "q"}).status_code == 409
+    assert client.post(f"/documents/{doc_id}/ask", json={"question": ""}).status_code == 422
+
+
+# ── Interactions are logged for review ────────────────────────────────────────
+
+def _logs(kind):
+    import json as _json
+
+    from engine.database import InteractionLog
+    db = SessionLocal()
+    try:
+        return [(log, _json.loads(log.record_json))
+                for log in db.query(InteractionLog).filter_by(user_id="dev-user", kind=kind).all()]
+    finally:
+        db.close()
+
+
+def test_ask_is_logged_with_passages_but_passages_are_not_sent_to_the_browser():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    result = {"answer": "Hi", "verification": "checked",
+              "passages": [{"chunk_id": 1, "text": "Hello"}], "models": {"answer": "m1", "check": "m2"}}
+
+    def fake_answer(question, document_id, emit):
+        emit("step", {"name": "answer", "success": True})
+        return result
+
+    try:
+        with patch("engine.qa.answer_question", side_effect=fake_answer):
+            events = _sse_events(client.post(f"/documents/{doc_id}/ask", json={"question": "greet?"}))
+        assert "passages" not in events[-1]
+        [(log, record)] = _logs("ask")
+        assert log.request == "greet?" and log.document_id == doc_id and log.review_status == "pending"
+        assert record["passages"] == [{"chunk_id": 1, "text": "Hello"}]
+        assert record["steps"] == [{"name": "answer", "success": True}]
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_run_is_logged_with_plan_steps_output_and_source():
+    from engine.schemas import RequestBrief
+    plan = _make_plan()
+    plan.brief = RequestBrief(count=3)
+    with (
+        patch("api.parse_intent", return_value=plan),
+        patch("api.build_node_for_step", return_value=_fake_node()),
+    ):
+        run_id = client.post("/run", json={"document": "Source text.", "request": "summarise"}).json()["run_id"]
+    [(log, record)] = _logs("run")
+    assert log.request == "summarise"
+    assert record["run_id"] == run_id and record["brief"] == {"count": 3}
+    assert record["plan"][0]["instructions"] == "Summarise"
+    assert record["output"] == {"summary": "Integration summary."}
+    assert record["source"] == "Source text."
+    assert record["steps"][0]["success"] is True
+
+
+# ── Workflow retrieval is limited to the run's document ───────────────────────
+
+def _retrieval_plan():
+    from engine.schemas import WorkflowPlan, WorkflowStep
+    return WorkflowPlan(goal="Find", estimated_steps=1, steps=[
+        WorkflowStep(name="retrieve_chunks", description="Find passages",
+                     input_key="query", output_key="retrieved_chunks")])
+
+
+def test_workflow_retrieval_searches_only_the_selected_document():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        with (
+            patch("api.parse_intent", return_value=_retrieval_plan()),
+            patch("engine.retrieval_node.retrieve_chunks", return_value=[]) as retrieve,
+        ):
+            res = client.post("/run", json={"document": "x", "request": "find hello", "document_id": doc_id})
+        assert res.status_code == 200, res.text
+        assert retrieve.call_args.kwargs["document_id"] == doc_id
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_workflow_retrieval_without_a_document_does_not_search_everything():
+    with (
+        patch("api.parse_intent", return_value=_retrieval_plan()),
+        patch("engine.retrieval_node.retrieve_chunks", return_value=[]) as retrieve,
+    ):
+        client.post("/run", json={"document": "raw text", "request": "find hello"})
+    retrieve.assert_not_called()
 
 
 # ── Background processing status ──────────────────────────────────────────────

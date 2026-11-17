@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { apiFetch } from "../lib/api"
+import { readEvents } from "../lib/sse"
 import { useNow } from "../lib/useNow"
 import { DocumentStatus, RunProgress } from "./RunProgress"
 
@@ -90,45 +91,30 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
         throw new Error(body.detail || `Run failed: ${res.status}`)
       }
 
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop()
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue
-          try {
-            const event = JSON.parse(line.slice(6))
-            if (event.type === "plan") {
-              setPipeline(p => ({
-                ...p, phase: "running", goal: event.goal,
-                steps: event.steps.map(s => ({ ...s, status: "queued" })),
-              }))
-            } else if (event.type === "step_start") {
-              updateStep(event.name, { status: "running", startedAt: Date.now() })
-            } else if (event.type === "step") {
-              updateStep(event.name, {
-                status: event.success ? "done" : "failed",
-                time_ms: event.time_ms, tokens: event.tokens, error: event.error,
-              })
-            } else if (event.type === "done") {
-              setPipeline(p => p && { ...p, phase: "done" })
-              onRunComplete(event)
-            } else if (event.type === "error") {
-              setError(event.message)
-              setPipeline(p => p && {
-                ...p, phase: "failed",
-                steps: p.steps.map(s => s.status === "running" ? { ...s, status: "failed" } : s),
-              })
-            }
-          } catch { /* skip malformed SSE lines */ }
+      await readEvents(res, event => {
+        if (event.type === "plan") {
+          setPipeline(p => ({
+            ...p, phase: "running", goal: event.goal,
+            steps: event.steps.map(s => ({ ...s, status: "queued" })),
+          }))
+        } else if (event.type === "step_start") {
+          updateStep(event.name, { status: "running", startedAt: Date.now() })
+        } else if (event.type === "step") {
+          updateStep(event.name, {
+            status: event.success ? "done" : "failed",
+            time_ms: event.time_ms, tokens: event.tokens, error: event.error,
+          })
+        } else if (event.type === "done") {
+          setPipeline(p => p && { ...p, phase: "done" })
+          onRunComplete(event)
+        } else if (event.type === "error") {
+          setError(event.message)
+          setPipeline(p => p && {
+            ...p, phase: "failed",
+            steps: p.steps.map(s => s.status === "running" ? { ...s, status: "failed" } : s),
+          })
         }
-      }
+      })
     } catch (err) {
       setError(err.message)
     } finally {

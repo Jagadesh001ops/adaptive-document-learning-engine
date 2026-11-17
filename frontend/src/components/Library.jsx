@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from '../lib/api'
 
-export default function Library({ onSelectDoc }) {
+export default function Library({ onSelectDoc, onAskDoc }) {
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(null)
@@ -68,6 +68,14 @@ export default function Library({ onSelectDoc }) {
                 )}
               </div>
               <div className="flex gap-2 shrink-0">
+                {onAskDoc && doc.status === 'ready' && (
+                  <button
+                    onClick={() => onAskDoc(doc)}
+                    className="text-xs px-2 py-1 bg-gray-800 border border-gray-700 text-gray-200 rounded hover:border-gray-500 transition"
+                  >
+                    Ask
+                  </button>
+                )}
                 {onSelectDoc && doc.status === 'ready' && (
                   <button
                     onClick={() => onSelectDoc(doc)}
