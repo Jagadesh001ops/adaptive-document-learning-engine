@@ -340,6 +340,30 @@ def test_search_no_docs_returns_empty():
     assert res.json()["results"] == []
 
 
+# ── Background processing status ──────────────────────────────────────────────
+
+def test_upload_returns_processing_then_becomes_ready():
+    res = client.post("/documents", files=_txt_file("bg.txt", "Background processing text."))
+    assert res.status_code == 202
+    assert res.json()["status"] == "processing"
+    # TestClient runs background tasks before returning, so processing is done here.
+    doc = client.get(f"/documents/{res.json()['document_id']}").json()
+    assert doc["status"] == "ready"
+
+
+def test_processing_error_marks_document_failed():
+    with patch("engine.chunking.chunk_text", side_effect=RuntimeError("chunker exploded")):
+        res = client.post("/documents", files=_txt_file("bad.txt", "Will fail to chunk."))
+    doc = client.get(f"/documents/{res.json()['document_id']}").json()
+    assert doc["status"] == "failed"
+    assert "chunker exploded" in doc["error_message"]
+
+    # Re-uploading the same file retries processing.
+    retry = client.post("/documents", files=_txt_file("bad.txt", "Will fail to chunk."))
+    assert retry.json()["document_id"] == doc["document_id"]
+    assert client.get(f"/documents/{doc['document_id']}").json()["status"] == "ready"
+
+
 # ── Run with a library document ───────────────────────────────────────────────
 
 def _library_doc(user_id: str = "dev-user", chunks=()):

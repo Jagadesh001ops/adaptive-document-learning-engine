@@ -1,16 +1,23 @@
 import { useEffect, useRef, useState } from "react"
 import { apiFetch } from "../lib/api"
+import { useNow } from "../lib/useNow"
+import { DocumentStatus, RunProgress } from "./RunProgress"
 
 const ACCEPT = ".pdf,.txt,.md,text/plain,application/pdf,text/markdown"
+const POLL_MS = 2000
 
 export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
   const [file, setFile] = useState(null)
   const [request, setRequest] = useState("")
   const [uploading, setUploading] = useState(false)
   const [streaming, setStreaming] = useState(false)
-  const [steps, setSteps] = useState([])      // live step events for progress display
+  const [docState, setDocState] = useState(null)
+  const [pipeline, setPipeline] = useState(null)
   const [error, setError] = useState(null)
   const fileInputRef = useRef(null)
+  const unmounted = useRef(false)
+
+  useEffect(() => () => { unmounted.current = true }, [])
 
   // When the user picks a doc from Library, clear any local file selection
   useEffect(() => {
@@ -18,12 +25,29 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
   }, [prefillDoc])
 
   const loading = uploading || streaming
+  const now = useNow(uploading || pipeline?.phase === "planning" || pipeline?.phase === "running")
+
+  const updateStep = (name, patch) =>
+    setPipeline(p => p && ({ ...p, steps: p.steps.map(s => s.name === name ? { ...s, ...patch } : s) }))
+
+  async function waitUntilReady(id) {
+    while (!unmounted.current) {
+      const res = await apiFetch(`/documents/${id}`)
+      if (!res.ok) throw new Error(`Could not check document status (${res.status})`)
+      const doc = await res.json()
+      if (doc.status === "ready") return doc
+      if (doc.status === "failed") throw new Error(doc.error_message || "Document processing failed")
+      setDocState(d => d && { ...d, status: "processing" })
+      await new Promise(r => setTimeout(r, POLL_MS))
+    }
+  }
 
   async function handleSubmit() {
     if (!file && !prefillDoc) { setError("Please select a file."); return }
     if (!request.trim()) { setError("Please enter a request."); return }
     setError(null)
-    setSteps([])
+    setPipeline(null)
+    setDocState(null)
 
     // The backend loads the document's extracted text from document_id.
     let documentId = prefillDoc?.document_id ?? null
@@ -31,6 +55,7 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
 
     if (file) {
       setUploading(true)
+      setDocState({ name: file.name, status: "uploading", startedAt: Date.now() })
       try {
         const form = new FormData()
         form.append("file", file)
@@ -38,8 +63,11 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
         const body = await res.json().catch(() => ({}))
         if (!res.ok) throw new Error(body.detail || `Upload failed: ${res.status}`)
         documentId = body.document_id
+        const doc = body.status === "ready" ? null : await waitUntilReady(documentId)
+        if (unmounted.current) return
+        setDocState(d => ({ ...d, status: "ready", pageCount: doc?.page_count, finishedAt: Date.now() }))
       } catch (err) {
-        setError(err.message)
+        setDocState(d => d && { ...d, status: "failed", error: err.message, finishedAt: Date.now() })
         return
       } finally {
         setUploading(false)
@@ -47,6 +75,7 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
     }
 
     setStreaming(true)
+    setPipeline({ phase: "planning", startedAt: Date.now(), steps: [] })
     try {
       const res = await apiFetch("/run/stream", {
         method: "POST",
@@ -75,16 +104,27 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
           if (!line.startsWith("data: ")) continue
           try {
             const event = JSON.parse(line.slice(6))
-            if (event.type === "step_start") {
-              setSteps(s => [...s, { name: event.name, running: true }])
+            if (event.type === "plan") {
+              setPipeline(p => ({
+                ...p, phase: "running", goal: event.goal,
+                steps: event.steps.map(s => ({ ...s, status: "queued" })),
+              }))
+            } else if (event.type === "step_start") {
+              updateStep(event.name, { status: "running", startedAt: Date.now() })
             } else if (event.type === "step") {
-              setSteps(s => s.map(x => x.name === event.name
-                ? { ...x, running: false, success: event.success, time_ms: event.time_ms }
-                : x))
+              updateStep(event.name, {
+                status: event.success ? "done" : "failed",
+                time_ms: event.time_ms, tokens: event.tokens, error: event.error,
+              })
             } else if (event.type === "done") {
+              setPipeline(p => p && { ...p, phase: "done" })
               onRunComplete(event)
             } else if (event.type === "error") {
               setError(event.message)
+              setPipeline(p => p && {
+                ...p, phase: "failed",
+                steps: p.steps.map(s => s.status === "running" ? { ...s, status: "failed" } : s),
+              })
             }
           } catch { /* skip malformed SSE lines */ }
         }
@@ -174,22 +214,8 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
           />
         </div>
 
-        {/* Live progress */}
-        {steps.length > 0 && (
-          <div className="space-y-1">
-            {steps.map((s, i) => (
-              <div key={i} className="flex items-center gap-2 text-sm">
-                <span className={`w-4 text-center ${s.running ? 'text-yellow-400 animate-pulse' : s.success ? 'text-green-400' : 'text-red-400'}`}>
-                  {s.running ? '…' : s.success ? '✓' : '✗'}
-                </span>
-                <span className={s.running ? 'text-white' : 'text-gray-400'}>{s.name}</span>
-                {s.time_ms !== undefined && !s.running && (
-                  <span className="ml-auto text-xs text-gray-600">{s.time_ms}ms</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {docState && <DocumentStatus doc={docState} now={now} />}
+        {pipeline && <RunProgress pipeline={pipeline} now={now} />}
 
         {error && <p className="text-red-400 text-sm">{error}</p>}
 
@@ -198,7 +224,7 @@ export default function SubmitRun({ onRunComplete, prefillDoc, onClearDoc }) {
           disabled={loading}
           className="w-full bg-white text-gray-950 font-medium text-sm py-3 rounded-lg hover:bg-gray-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {uploading ? "Extracting document…" : streaming ? "Running workflow…" : "Run Workflow"}
+          {uploading ? "Preparing document…" : streaming ? "Running workflow…" : "Run Workflow"}
         </button>
       </div>
     </div>

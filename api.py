@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -10,7 +11,16 @@ import queue
 import threading
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -143,15 +153,46 @@ async def _enqueue(job_name: str, **kwargs):
 
 # ─── Documents ────────────────────────────────────────────────────────────────
 
+def _process_document(doc_id: int, text: str, page_count: int, char_count: int) -> None:
+    import logging
+
+    from engine.chunking import chunk_text
+    from engine.embeddings import embed_batch
+    db = SessionLocal()
+    try:
+        chunks = chunk_text(text)
+        embeddings = embed_batch([c.text for c in chunks]) if chunks else []
+        store_chunks(db, doc_id, chunks, embeddings)
+        d = db.query(Document).filter_by(id=doc_id).first()
+        if d:
+            d.status = "ready"
+            d.page_count = page_count
+            d.char_count = char_count
+            d.error_message = None
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logging.getLogger(__name__).exception("processing document %d failed", doc_id)
+        d = db.query(Document).filter_by(id=doc_id).first()
+        if d:
+            d.status = "failed"
+            d.error_message = str(exc)
+            db.commit()
+    finally:
+        db.close()
+
+
 @app.post("/documents", status_code=202)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_id: str = Depends(get_current_user),
 ):
     data = await file.read(26 * 1024 * 1024)
     try:
-        result = ingest(data=data, filename=file.filename or "upload",
-                        content_type=file.content_type or "")
+        # Extraction is CPU-bound; run it off the event loop so other requests keep flowing.
+        result = await asyncio.to_thread(ingest, data=data, filename=file.filename or "upload",
+                                         content_type=file.content_type or "")
     except IngestionError as exc:
         raise HTTPException(status_code=413 if "25 MB" in str(exc) else 415, detail=str(exc)) from exc
     except ExtractionError as exc:
@@ -174,7 +215,14 @@ async def upload_document(
     finally:
         db.close()
 
-    if created or doc_status == "processing":
+    if created or doc_status in ("processing", "failed"):
+        if doc_status == "failed":
+            db = SessionLocal()
+            try:
+                db.query(Document).filter_by(id=doc_id).update({"status": "processing"})
+                db.commit()
+            finally:
+                db.close()
         _async_ingest = os.getenv("ASYNC_INGEST", "1") == "1"
         try:
             if not _async_ingest:
@@ -182,23 +230,11 @@ async def upload_document(
             await _enqueue("ingest_document", document_id=doc_id, raw_bytes=data)
         except Exception as exc:
             import logging
-            logging.getLogger(__name__).warning("Redis unavailable (%s), processing sync", exc)
-            from engine.chunking import chunk_text
-            from engine.embeddings import embed_batch
-            chunks = chunk_text(result.text)
-            embeddings = embed_batch([c.text for c in chunks]) if chunks else []
-            db2 = SessionLocal()
-            try:
-                store_chunks(db2, doc_id, chunks, embeddings)
-                d = db2.query(Document).filter_by(id=doc_id).first()
-                if d:
-                    d.status = "ready"
-                    d.page_count = result.page_count
-                    d.char_count = result.char_count
-                db2.commit()
-                doc_status = "ready"
-            finally:
-                db2.close()
+            logging.getLogger(__name__).warning("Redis unavailable (%s), processing in background", exc)
+            # Runs in a worker thread after the response is sent; clients poll GET /documents/{id}.
+            background_tasks.add_task(_process_document, doc_id, result.text,
+                                      result.page_count, result.char_count)
+            doc_status = "processing"
 
     return {"document_id": doc_id, "status": doc_status, "created": created,
             "filename": result.filename, "size_bytes": result.size_bytes,
