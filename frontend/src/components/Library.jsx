@@ -6,16 +6,24 @@ export default function Library({ onSelectDoc }) {
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(null)
 
-  const load = async () => {
-    setLoading(true)
+  const load = async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true)
     try {
       const res = await apiFetch("/documents")
       if (res.ok) setDocs(await res.json())
     } catch { /* ignore fetch errors */ }
-    setLoading(false)
+    if (!silent) setLoading(false)
   }
 
   useEffect(() => { load() }, [])
+
+  // Keep refreshing while anything is still being processed.
+  const anyProcessing = docs.some(d => d.status === 'processing')
+  useEffect(() => {
+    if (!anyProcessing) return
+    const id = setInterval(() => load({ silent: true }), 3000)
+    return () => clearInterval(id)
+  }, [anyProcessing])
 
   const deleteDoc = async (id) => {
     if (!confirm('Delete this document?')) return
@@ -51,10 +59,13 @@ export default function Library({ onSelectDoc }) {
                 <p className="text-sm font-medium truncate">{doc.filename}</p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {doc.page_count} p · {(doc.size_bytes / 1024).toFixed(1)} KB ·{' '}
-                  <span className={`${doc.status === 'ready' ? 'text-green-400' : doc.status === 'failed' ? 'text-red-400' : 'text-yellow-400'}`}>
-                    {doc.status}
+                  <span className={`${doc.status === 'ready' ? 'text-green-400' : doc.status === 'failed' ? 'text-red-400' : 'text-amber-300'}`}>
+                    {doc.status === 'processing' ? 'processing — building search index, available shortly' : doc.status}
                   </span>
                 </p>
+                {doc.status === 'failed' && doc.error_message && (
+                  <p className="text-xs text-red-400/80 mt-0.5 truncate" title={doc.error_message}>{doc.error_message}</p>
+                )}
               </div>
               <div className="flex gap-2 shrink-0">
                 {onSelectDoc && doc.status === 'ready' && (

@@ -1,6 +1,7 @@
 import { supabase } from "./supabase"
 
-const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000"
+// Production builds are served by FastAPI, so they call their own origin unless overridden.
+const BASE = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? "" : "http://localhost:8000")
 
 export async function apiFetch(path, options = {}) {
   const { data: { session } } = await supabase.auth.getSession()
