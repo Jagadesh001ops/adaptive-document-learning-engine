@@ -175,7 +175,8 @@ class GenerateQuizNode(LLMNode):
             f"generate exactly {count} multiple-choice questions at {difficulty} difficulty "
             f"({self._LEVELS[difficulty]}). Every question and answer must be supported by "
             "the source material — do not rely on outside knowledge. For each question cite "
-            "the chunk_id of the chunk it came from. "
+            "the chunk_id of the chunk it came from, with a short excerpt copied exactly from "
+            "that chunk. "
             "Return ONLY a JSON array — no extra text:\n"
             '[\n'
             '  {\n'
@@ -209,17 +210,10 @@ class GenerateQuizNode(LLMNode):
         except _json.JSONDecodeError:
             output = raw
 
-        # Attach document_id from chunks if available
-        chunks = state.get("retrieved_chunks") or []
-        chunk_map = {c.get("chunk_id"): c for c in chunks}
         if isinstance(output, list):
-            for item in output:
-                cit = item.get("citation")
-                if isinstance(cit, dict) and cit.get("chunk_id") in chunk_map:
-                    chunk = chunk_map[cit["chunk_id"]]
-                    cit["document_id"] = chunk.get("document_id")
-                    cit["char_start"] = chunk.get("char_start")
-                    cit["char_end"] = chunk.get("char_end")
+            # The requested number is a rule, not a suggestion.
+            output = [item for item in output if isinstance(item, dict)][:self._settings()[0]]
+            attach_citations(output, state.get("retrieved_chunks") or [])
 
         return NodeResult(
             success=True,
@@ -228,6 +222,33 @@ class GenerateQuizNode(LLMNode):
             input_tokens=response.usage.prompt_tokens,
             output_tokens=response.usage.completion_tokens,
         )
+
+
+def attach_citations(items: list, chunks: list) -> None:
+    """Add source positions to each quiz item's citation and check its quote is really in that chunk.
+
+    Items whose quote can't be found are marked verified=False with a note, never dropped."""
+    from .qa import _norm
+    chunk_map = {c.get("chunk_id"): c for c in chunks}
+    for item in items:
+        cit = item.get("citation")
+        if not isinstance(cit, dict) or cit.get("chunk_id") not in chunk_map:
+            if chunks:
+                item["verified"] = False
+                item["verification_note"] = "No source passage cited."
+            continue
+        chunk = chunk_map[cit["chunk_id"]]
+        cit["document_id"] = chunk.get("document_id")
+        cit["char_start"] = chunk.get("char_start")
+        cit["char_end"] = chunk.get("char_end")
+        # Excerpts may skip words with an ellipsis; each piece must appear in the passage.
+        excerpt = (cit.get("excerpt") or "").replace(chr(0x2026), "...")
+        parts = [p for p in (_norm(x) for x in excerpt.split("...")) if p]
+        if parts and all(p in _norm(chunk.get("text", "")) for p in parts):
+            item.setdefault("verified", True)
+        else:
+            item["verified"] = False
+            item["verification_note"] = "The quoted excerpt isn't in the cited passage."
 
 
 class RetrieveChunksNode(BaseNode):

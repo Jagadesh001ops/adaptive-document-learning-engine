@@ -1,18 +1,22 @@
-# AI Workflow Engine
+# Adaptive Document Learning Engine
 
-Upload a document, describe what you want in plain English, and get back study material built from it — a summary, key concepts, and a quiz whose answers are checked against the source text.
+Upload a document and study it in a conversation. Ask why something happened, ask for a summary, ask to be quizzed, ask to make question 2 harder, or do several of those in one message. Every answer is grounded in the document and checked against it.
 
 The interesting part isn't the summary, it's the planner. You don't pick from a menu of features. You write something like *"summarize chapter one and give me five hard questions"*, a language model turns that into a small pipeline of steps, and the engine runs those steps in order, passing each one's output to the next. You can watch every step run in the UI.
 
 ## What it does
 
+- **Study sessions.** One conversation per document, and any message can ask for anything. A planner reads the message and the conversation so far and composes a plan from five tools: `answer`, `summarize`, `concepts`, `quiz` and `revise`, in any order and number. *"Explain why the Church feared print, then give me 3 hard questions on it"* runs an answer and then a quiz built on that answer. *"Make question 2 easier"* rewrites only question 2 of the earlier quiz and leaves the others exactly as they were. Each step has its own settings, so "4 bullet points and 3 questions" gets 4 bullets and 3 questions, never 4 of each.
+- **Memory.** Follow-ups like *"and why did that matter?"* work: the planner turns each message into a standalone search using the conversation, and a context keeper remembers which passages the conversation relied on and reads them again with fresh search results.
+- **Quizzes grounded in the text.** Questions are written from document passages, not from a summary. Each one cites a passage, and code checks that the quoted excerpt really appears there; questions that fail are flagged, not hidden. The requested number of questions is enforced in code.
+- **Word-style exports.** Download a whole session, or one turn of it, as a PDF or a Word document. Each request becomes a heading, quotes are set as block quotes, questions are numbered with indented options, and the answer key is on its own page.
 - **Document library.** Upload PDF, TXT or Markdown files (up to 25 MB, 10 per user). Text is extracted, split into overlapping ~600-token chunks, embedded, and stored in Postgres with pgvector. Processing runs in the background and the UI shows its progress.
 - **Request → plan → run.** Your request is turned into an ordered list of steps. Each step reads one value from a shared state and writes another, e.g. `document → summary → quiz`.
 - **The request shapes every step.** The planner also pulls out what you asked for — format, length, number of questions, difficulty, focus, audience — and each step sees your original request, the overall goal and its own instructions. "Summarize chapter one as bullet points and give me three hard questions" gets bullet points and three hard questions, not a stock paragraph and five medium ones.
 - **Live progress.** Runs stream over server-sent events. The UI shows the planned pipeline up front, then each step's state, timing and token count as it executes.
 - **Quiz verification.** When a plan includes the `verify_quiz` step, the model checks each answer against the retrieved source passages. Answers that fail are regenerated once; if they still fail they're kept but flagged, not silently dropped.
 - **Ask the document anything.** Facts, why something happened, comparisons, what an idea means. Each answer comes with a justification and exact quotes from the passages it used. Before you see it, the quotes are checked against the text and a second model judges whether they really support the answer. If not, the system re-reads the document for what's missing — new passages only — and revises, up to twice. If it still can't support an answer it says so instead of guessing. Every answer ends with follow-up questions you can click.
-- **Claude as supervisor.** Every Ask and every run is logged in full. Running `/review-logs` in Claude Code fetches the unreviewed logs, and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role, then saves the reviews back to the app. `GET /admin/reviews/summary` aggregates the results per model.
+- **Claude as supervisor.** Every conversation turn, Ask and run is logged in full, failures included. Running `/review-logs` in Claude Code fetches the unreviewed logs, and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role, then saves the reviews back to the app. `GET /admin/reviews/summary` aggregates the results per model.
 - **Semantic search** across your uploaded documents.
 - **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
 
@@ -37,6 +41,20 @@ Requests that don't map cleanly onto these steps fall back to a generic LLM step
 - **Queue:** Redis + ARQ for background ingestion (optional; see `ASYNC_INGEST`)
 - **Frontend:** React + Vite + Tailwind
 - **Ops:** Docker, GitHub Actions, Prometheus metrics
+
+## How a study turn works
+
+```
+message + conversation ──► planner ──► [answer] ──► [quiz, building on the answer] ──► blocks
+                               │            │                │
+                     standalone search   find → answer → check → re-read → revise
+                                         passages from search + context keeper
+```
+
+1. The planner (`PLANNER_MODEL`) returns a goal, a standalone search query and a list of tool steps, each with its own count, difficulty, format and scope (whole document or one topic). Greetings and unclear messages get a short reply instead.
+2. Each step runs in order and produces a block (an answer, a summary, concepts or a quiz) that streams to the browser as soon as it's ready. A step can build on the previous step's output.
+3. `revise` finds the earlier output the user means (a turn, and a question number if named), sends only that part to the model with its source passages, and keeps everything else untouched.
+4. The turn is saved to the conversation, the context keeper's memory is updated, and the full record (history, plan, steps, blocks, passages) is logged for review.
 
 ## How a run works
 
@@ -113,12 +131,17 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `POST` | `/documents` | Upload a file; returns immediately with `status: processing` |
 | `GET` | `/documents`, `/documents/{id}` | List documents / check processing status |
 | `DELETE` | `/documents/{id}` | Delete a document and its chunks |
-| `POST` | `/documents/{id}/ask` | Ask a question about one document, streamed as server-sent events |
+| `POST` | `/sessions` | Start a study session on a document |
+| `GET` | `/sessions?document_id=`, `/sessions/{id}` | List sessions / a session with all its turns |
+| `POST` | `/sessions/{id}/messages` | Send a message; the turn's plan, steps and outputs stream as server-sent events |
+| `GET` | `/sessions/{id}/export?format=pdf\|docx&turn=&page_size=A4\|letter` | Download the session, or one turn, as a Word-style PDF or DOCX |
+| `DELETE` | `/sessions/{id}` | Delete a session |
+| `POST` | `/documents/{id}/ask` | Ask a single question about one document, streamed as server-sent events |
 | `GET` | `/search?q=` | Semantic search across your documents |
 | `POST` | `/run` | Run a workflow and return the result |
 | `POST` | `/run/stream` | Same, streamed as server-sent events |
 | `GET` | `/runs`, `/runs/{id}` | Run history |
-| `GET` | `/runs/{id}/export/pdf`, `/runs/{id}/export/anki` | Export a run |
+| `GET` | `/runs/{id}/export/pdf`, `/export/docx`, `/export/anki` | Export a run |
 | `POST` | `/quiz/attempt` | Submit quiz answers for scoring |
 | `GET` | `/quiz/history` | Past quiz scores |
 | `GET` | `/health` | Checks the database and Redis; 503 if either is down |
@@ -160,7 +183,8 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
 - **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
-- **No memory between requests yet.** Each Ask question and each run is handled on its own, so "and why did that matter?" doesn't know what "that" refers to.
+- **The old screens are still separate.** The study-session API is built, but the browser UI still shows the separate New Run and Ask screens until the Study screen replaces them. Runs and single Asks have no memory between requests.
+- **Revised answers aren't re-checked.** When `revise` rewrites an answer it's marked unchecked; revised quiz questions get the quote check only.
 - **Auth is optional and currently off** in the deployed build.
 - **No fallback provider.** When a Groq model is rate-limited, the request fails with a "try again" message.
 - **Reviews read real user content.** `/review-logs` pulls logged questions, answers and document passages into your Claude Code session. Fine for study material; think twice once real users upload private documents.

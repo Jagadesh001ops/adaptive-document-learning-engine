@@ -118,7 +118,7 @@ export default function Results({ run, onNewRun }) {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `study-kit-${run.run_id}.${format === 'anki' ? 'apkg' : 'pdf'}`
+      a.download = `study-kit-${run.run_id}.${format === 'anki' ? 'apkg' : format}`
       a.click()
       URL.revokeObjectURL(url)
     } catch (e) {
@@ -143,6 +143,13 @@ export default function Results({ run, onNewRun }) {
             className="text-xs px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-md text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-40"
           >
             {exporting === 'pdf' ? 'Exporting…' : 'PDF'}
+          </button>
+          <button
+            onClick={() => downloadExport('docx')}
+            disabled={!!exporting}
+            className="text-xs px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-md text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-40"
+          >
+            {exporting === 'docx' ? 'Exporting…' : 'Word'}
           </button>
           <button
             onClick={() => downloadExport('anki')}

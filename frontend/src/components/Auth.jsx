@@ -31,7 +31,7 @@ export default function Auth() {
     <div className="min-h-screen bg-gray-950 flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <h1 className="text-2xl font-semibold text-white text-center mb-8">
-          AI Workflow Engine
+          Adaptive Document Learning Engine
         </h1>
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">

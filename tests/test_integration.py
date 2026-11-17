@@ -63,7 +63,11 @@ def clean_tables():
     yield
     db = SessionLocal()
     try:
-        from engine.database import InteractionLog
+        from engine.database import InteractionLog, StudyMessage, StudySession
+        session_ids = [s for (s,) in db.query(StudySession.id).filter_by(user_id="dev-user")]
+        if session_ids:
+            db.query(StudyMessage).filter(StudyMessage.session_id.in_(session_ids)).delete()
+            db.query(StudySession).filter(StudySession.id.in_(session_ids)).delete()
         db.query(InteractionLog).filter_by(user_id="dev-user").delete()
         db.query(QuizAttempt).filter_by(user_id="dev-user").delete()
         db.query(WorkflowRun).filter_by(user_id="dev-user").delete()
@@ -347,7 +351,8 @@ def test_search_no_docs_returns_empty():
 def test_run_passes_request_context_to_steps():
     from engine.schemas import RequestBrief
     plan = _make_plan()
-    plan.brief = RequestBrief(format="bullet points", count=3)
+    plan.brief = RequestBrief(format="bullet points", count=9)   # a shared count is never passed on
+    plan.steps[0].count = 3
     node = _fake_node()
     with (
         patch("api.parse_intent", return_value=plan),
@@ -593,3 +598,178 @@ def test_run_with_other_users_document_returns_404():
         assert res.status_code == 404
     finally:
         _cleanup_doc(doc_id)
+
+
+def test_failed_asks_are_logged_for_review():
+    from engine.qa import ModelBusy
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        with patch("engine.qa.answer_question", side_effect=ModelBusy("The model is busy")):
+            _sse_events(client.post(f"/documents/{doc_id}/ask", json={"question": "why?"}))
+        [(log, record)] = _logs("ask")
+        assert log.request == "why?" and record["error"] == "The model is busy"
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_run_docx_export_returns_a_word_document():
+    res = client.post("/documents", files=_txt_file("w.txt", "Words."))
+    assert res.status_code == 202
+    with patch("api.parse_intent", return_value=_make_plan()), \
+         patch("api.build_node_for_step", return_value=_fake_node()):
+        run_id = client.post("/run", json={"document": "Text.", "request": "summarise"}).json()["run_id"]
+    res = client.get(f"/runs/{run_id}/export/docx")
+    assert res.status_code == 200 and res.content[:2] == b"PK"
+    assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert client.get("/runs/999999/export/docx").status_code == 404
+
+
+# ── Study sessions ────────────────────────────────────────────────────────────
+
+def _fake_turn(message, document_id, turns, memory, emit):
+    emit("step_start", {"name": "plan"})
+    emit("step", {"name": "plan", "success": True, "time_ms": 3, "tokens": 5})
+    block = {"type": "summary", "text": f"Summary for: {message}", "step": 0}
+    emit("block", {"block": block})
+    return {"message": message, "goal": "summarize", "plan": {"steps": [{"tool": "summarize"}]},
+            "reply": None, "blocks": [block], "steps": [{"name": "plan", "success": True}],
+            "error": None, "passages": [{"chunk_id": 1, "text": "Hello"}], "sources": {},
+            "targets": [], "memory": {"chunk_ids": [len(turns) + 1]}, "total_tokens": 5, "time_ms": 3,
+            "models": {"steps": "m"}, "seen_turns": len(turns), "seen_memory": memory}
+
+
+def _new_session(doc_id):
+    res = client.post("/sessions", json={"document_id": doc_id})
+    assert res.status_code == 201, res.text
+    return res.json()["session_id"]
+
+
+def _send(session_id, message):
+    with patch("engine.study.run_turn", side_effect=lambda **kw: _fake_turn(**kw)):
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": message})
+    assert res.status_code == 200, res.text
+    return _sse_events(res)
+
+
+def test_session_conversation_streams_turns_and_remembers_them():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        sid = _new_session(doc_id)
+        events = _send(sid, "Summarize this")
+        assert [e["type"] for e in events] == ["step_start", "step", "block", "done"]
+        assert events[2]["block"]["type"] == "summary"
+        turn = events[-1]["turn"]
+        assert turn["turn"] == 1 and turn["message"] == "Summarize this"
+        assert turn["blocks"][0]["text"] == "Summary for: Summarize this"
+        assert "passages" not in turn and "memory" not in turn, "review-only data stays server-side"
+
+        second = _send(sid, "Now make it shorter")[-1]["turn"]
+        assert second["turn"] == 2 and second["seen_turns"] == 1
+        assert second["seen_memory"] == {"chunk_ids": [1]}, "the context keeper's memory carries over"
+
+        session = client.get(f"/sessions/{sid}").json()
+        assert session["title"] == "Summarize this"
+        assert [t["message"] for t in session["turns"]] == ["Summarize this", "Now make it shorter"]
+        listing = client.get("/sessions", params={"document_id": doc_id}).json()
+        assert listing[0]["session_id"] == sid and listing[0]["turns"] == 2
+
+        logs = _logs("turn")
+        assert len(logs) == 2
+        log, record = logs[-1]
+        assert log.document_id == doc_id and record["turn"] == 2
+        assert record["passages"] == [{"chunk_id": 1, "text": "Hello"}]
+        assert "Turn 1 - user: Summarize this" in record["history"]
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_session_detail_returns_the_stored_turns_and_document():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        sid = _new_session(doc_id)
+        _send(sid, "First")
+        body = client.get(f"/sessions/{sid}").json()
+        assert body["document"]["document_id"] == doc_id
+        assert [t["message"] for t in body["turns"]] == ["First"]
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_session_export_pdf_and_docx():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        sid = _new_session(doc_id)
+        _send(sid, "Summarize this")
+        pdf = client.get(f"/sessions/{sid}/export", params={"format": "pdf"})
+        assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+        assert 'filename="lib-study.pdf"' in pdf.headers["content-disposition"]
+        docx = client.get(f"/sessions/{sid}/export", params={"format": "docx", "turn": 1,
+                                                              "page_size": "letter"})
+        assert docx.status_code == 200 and docx.content[:2] == b"PK"
+        assert "lib-turn-1.docx" in docx.headers["content-disposition"]
+        assert client.get(f"/sessions/{sid}/export", params={"turn": 5}).status_code == 404
+        assert client.get(f"/sessions/{sid}/export", params={"format": "exe"}).status_code == 422
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_sessions_are_private_and_need_a_ready_document():
+    other = _library_doc(user_id="someone-else", chunks=[(0, 5, "Hello")])
+    try:
+        assert client.post("/sessions", json={"document_id": other}).status_code == 404
+    finally:
+        _cleanup_doc(other)
+    assert client.get("/sessions/999999").status_code == 404
+    assert client.post("/sessions/999999/messages", json={"message": "hi"}).status_code == 404
+
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        sid = _new_session(doc_id)
+        assert client.post(f"/sessions/{sid}/messages", json={"message": ""}).status_code == 422
+        db = SessionLocal()
+        try:
+            db.query(Document).filter_by(id=doc_id).update({"status": "processing"})
+            db.commit()
+        finally:
+            db.close()
+        assert client.post(f"/sessions/{sid}/messages", json={"message": "hi"}).status_code == 409
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_a_failed_turn_is_saved_reported_and_logged():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+
+    def failing(**kw):
+        result = _fake_turn(**kw)
+        return {**result, "blocks": [], "error": "The model is busy"}
+
+    try:
+        sid = _new_session(doc_id)
+        with patch("engine.study.run_turn", side_effect=failing):
+            events = _sse_events(client.post(f"/sessions/{sid}/messages", json={"message": "quiz me"}))
+        assert [e["type"] for e in events][-2:] == ["error", "done"]
+        assert events[-1]["turn"]["error"] == "The model is busy"
+        [(_, record)] = _logs("turn")
+        assert record["error"] == "The model is busy"
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_deleting_a_session_or_its_document_removes_the_conversation():
+    from engine.database import StudyMessage, StudySession
+    res = client.post("/documents", files=_txt_file("conv.txt", "Conversation source."))
+    doc_id = res.json()["document_id"]
+    sid = _new_session(doc_id)
+    _send(sid, "hello")
+    keep = _new_session(doc_id)
+    assert client.delete(f"/sessions/{sid}").status_code == 204
+    assert client.get(f"/sessions/{sid}").status_code == 404
+
+    assert client.delete(f"/documents/{doc_id}").status_code == 204
+    db = SessionLocal()
+    try:
+        assert db.query(StudySession).filter_by(id=keep).count() == 0
+        assert db.query(StudyMessage).filter(StudyMessage.session_id.in_([sid, keep])).count() == 0
+    finally:
+        db.close()

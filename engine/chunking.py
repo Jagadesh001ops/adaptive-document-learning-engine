@@ -100,3 +100,13 @@ def chunk_text(text: str) -> List[Chunk]:
         start += advance
 
     return chunks
+
+
+def join_chunks(chunks) -> str:
+    """Rebuild document text from overlapping chunks (ordered by position), without duplicates."""
+    parts, covered = [], 0
+    for c in chunks:
+        skip = max(0, covered - c.char_start)
+        parts.append(c.text[skip:])
+        covered = max(covered, c.char_end)
+    return "".join(parts)

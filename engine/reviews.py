@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .database import InteractionLog, SessionLocal
 
-Role = Literal["planner", "worker", "answerer", "checker", "reviser", "retrieval"]
+Role = Literal["planner", "worker", "answerer", "checker", "reviser", "retrieval", "keeper"]
 Rating = Literal["yes", "partly", "no"]
 RATED = ("correct", "grounded", "followed_request", "checker_accurate")
 
@@ -81,6 +81,9 @@ def save_review(log_id: int, review: Review, reviewer: str) -> bool:
 
 def _model_of(log: InteractionLog, record: dict) -> str:
     models = record.get("models") or {}
+    if log.kind == "turn":
+        tools = "+".join(s.get("tool", "?") for s in (record.get("plan") or {}).get("steps") or [])
+        return f"{tools or 'reply'}:{models.get('steps') or 'unknown'}"
     return models.get("answer" if log.kind == "ask" else "steps") or "unknown"
 
 
@@ -92,7 +95,8 @@ def summarize() -> dict:
     finally:
         db.close()
 
-    groups: dict = defaultdict(lambda: {"reviewed": 0, "verdicts": Counter(), "yes": Counter()})
+    groups: dict = defaultdict(lambda: {"reviewed": 0, "verdicts": Counter(), "yes": Counter(),
+                                        "rated": Counter()})
     issues_by_role, advice = Counter(), []
     for log in logs:
         if log.review_status != "reviewed":
@@ -101,6 +105,8 @@ def summarize() -> dict:
         g = groups[f"{log.kind}:{_model_of(log, record)}"]
         g["reviewed"] += 1
         g["verdicts"][review["verdict"]] += 1
+        # "not_applicable" is neither a pass nor a fail, so it's left out of that rate.
+        g["rated"].update(f for f in RATED if review.get(f) not in (None, "not_applicable"))
         g["yes"].update(f for f in RATED if review.get(f) == "yes")
         issues_by_role.update(i["role"] for i in review.get("issues", []))
         advice.extend({"role": a["role"], "lesson": a["lesson"], "log_id": log.id}
@@ -111,7 +117,8 @@ def summarize() -> dict:
         "status": dict(Counter(log.review_status for log in logs)),
         "by_kind_and_model": {
             key: {"reviewed": g["reviewed"], "verdicts": dict(g["verdicts"]),
-                  "rates": {f: round(g["yes"][f] / g["reviewed"], 2) for f in RATED}}
+                  "rates": {f: round(g["yes"][f] / g["rated"][f], 2) if g["rated"][f] else None
+                            for f in RATED}}
             for key, g in groups.items()
         },
         "issues_by_role": dict(issues_by_role),

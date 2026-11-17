@@ -104,3 +104,24 @@ def test_summary_reports_rates_problems_and_advice():
     assert group["rates"]["correct"] == 0.5 and group["rates"]["checker_accurate"] == 0.5
     assert summary["issues_by_role"]["checker"] >= 1
     assert {"role": "answerer", "lesson": "Lead with the direct answer.", "log_id": a} in summary["recent_advice"]
+
+
+def test_not_applicable_ratings_are_left_out_of_rates():
+    log_id = record_interaction(user_id=USER, kind="run", request="r", document_id=7,
+                                record={"models": {"steps": "reviews-na-model"}})
+    review = {**GOOD, "checker_accurate": "not_applicable", "grounded": "partly"}
+    assert client.post(f"/admin/logs/{log_id}/review", json=review, headers=AUTH).status_code == 200
+    rates = client.get("/admin/reviews/summary", headers=AUTH).json()["by_kind_and_model"][
+        "run:reviews-na-model"]["rates"]
+    assert rates["checker_accurate"] is None and rates["grounded"] == 0.0 and rates["correct"] == 1.0
+
+
+def test_turn_logs_are_grouped_by_the_tools_used():
+    log_id = record_interaction(user_id=USER, kind="turn", request="explain then quiz", document_id=7,
+                                record={"plan": {"steps": [{"tool": "answer"}, {"tool": "quiz"}]},
+                                        "models": {"steps": "reviews-turn-model"}})
+    keeper_issue = {**GOOD, "issues": [{"role": "keeper", "problem": "Lost the earlier topic."}]}
+    assert client.post(f"/admin/logs/{log_id}/review", json=keeper_issue, headers=AUTH).status_code == 200
+    summary = client.get("/admin/reviews/summary", headers=AUTH).json()
+    assert summary["by_kind_and_model"]["turn:answer+quiz:reviews-turn-model"]["reviewed"] == 1
+    assert summary["issues_by_role"]["keeper"] >= 1

@@ -89,7 +89,7 @@ class InteractionLog(Base):
 
     id            = Column(Integer, primary_key=True, index=True)
     user_id       = Column(String, nullable=True, index=True)
-    kind          = Column(String, nullable=False)              # ask | run
+    kind          = Column(String, nullable=False)              # turn | ask | run
     document_id   = Column(Integer, nullable=True)
     request       = Column(Text, nullable=False)
     record_json   = Column(Text, nullable=False)                # everything the reviewer needs
@@ -98,6 +98,33 @@ class InteractionLog(Base):
     review_json   = Column(Text, nullable=True)
     review_model  = Column(String, nullable=True)
     reviewed_at   = Column(DateTime, nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+
+class StudySession(Base):
+    """One conversation about one document. Any message can ask for answers, summaries, quizzes
+    or changes to earlier output."""
+    __tablename__ = "study_sessions"
+    __table_args__ = {"extend_existing": True}
+
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String, nullable=True, index=True)
+    document_id   = Column(Integer, nullable=False, index=True)
+    title         = Column(String, nullable=True)
+    memory_json   = Column(Text, nullable=True)   # context keeper: passages worth remembering
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow)
+
+
+class StudyMessage(Base):
+    """A user message, or the assistant's turn (plan, steps and outputs) in reply to it."""
+    __tablename__ = "study_messages"
+    __table_args__ = {"extend_existing": True}
+
+    id            = Column(Integer, primary_key=True, index=True)
+    session_id    = Column(Integer, nullable=False, index=True)
+    role          = Column(String, nullable=False)   # user | assistant
+    content       = Column(Text, nullable=False)     # user text, or the turn JSON
     created_at    = Column(DateTime, default=datetime.utcnow)
 
 
@@ -121,7 +148,7 @@ def _sync_columns():
     """Add any model columns missing from already-existing tables."""
     inspector = inspect(engine)
     existing_tables = inspector.get_table_names()
-    models = [WorkflowRun, Document, DocumentChunk, QuizAttempt]
+    models = [WorkflowRun, Document, DocumentChunk, QuizAttempt, StudySession]
     with engine.begin() as conn:
         for model in models:
             tname = model.__tablename__

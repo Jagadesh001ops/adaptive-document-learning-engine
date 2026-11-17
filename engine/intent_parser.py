@@ -49,7 +49,9 @@ Analyse the user's request and return ONLY a JSON object:
             "name": "snake_case_step_name",
             "description": "Instruction for this step, specific to the user's request",
             "input_key": "key this step reads from",
-            "output_key": "key this step writes to"
+            "output_key": "key this step writes to",
+            "count": null,
+            "difficulty": null
         }}
     ]
 }}
@@ -57,7 +59,8 @@ Analyse the user's request and return ONLY a JSON object:
 Brief rules:
 - Record only preferences the user actually stated; leave everything else null. Never invent preferences.
 - format: how output should look ("bullet points", "table"). length: how long ("two sentences", "detailed").
-- count: number of items requested (e.g. "three questions" -> 3). difficulty: "easy", "medium" or "hard".
+- count: leave null in the brief. Numbers belong to a single step: put them on that step instead.
+- difficulty: "easy", "medium" or "hard" when the user stated one for the whole request.
 - focus: the part or topic of the document to concentrate on. audience: who it is for ("a 10-year-old").
 - notes: any other explicit instruction that doesn't fit the fields above.
 
@@ -67,6 +70,11 @@ Step description rules:
   French Revolution simply and give me 3 hard questions", the summarize step's description is
   "Summarize the causes of the French Revolution in plain language" and the quiz step's is
   "Write 3 hard questions on the causes of the French Revolution".
+
+Step count and difficulty:
+- Put every number the user gave on the step it belongs to, as that step's "count". For "summarize
+  as 4 bullet points and give me 3 hard questions" the summarize step has count 4 and the quiz
+  step has count 3 and difficulty "hard". Never copy one step's number to another step.
 
 Scope rules:
 - "single_document"  — request concerns one specific document
