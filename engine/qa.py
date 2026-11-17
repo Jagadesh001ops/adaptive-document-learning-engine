@@ -230,5 +230,7 @@ def answer_question(question: str, document_id: int, emit: Optional[Emit] = None
         "revisions": revisions,
         "problems": problems if verification == "unverified" else [],
         "passages_read": len(read),
+        "passages": [{"chunk_id": p["chunk_id"], "text": p["text"]} for p in read.values()],
+        "models": {"answer": ANSWER_MODEL, "check": CHECK_MODEL},
         "total_tokens": total,
     }

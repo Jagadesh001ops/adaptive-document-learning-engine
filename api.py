@@ -38,6 +38,7 @@ from engine.database import (
     WorkflowRun,
     get_or_create_document,
     init_db,
+    record_interaction,
     store_chunks,
 )
 from engine.execution_engine import ExecutionEngine
@@ -309,13 +310,19 @@ def ask_document(document_id: int, body: AskRequest, user_id: str = Depends(get_
 
     def event_generator():
         q: queue.Queue = queue.Queue()
+        steps: list = []
 
         def emit(kind, payload):
+            if kind == "step":
+                steps.append(payload)
             q.put({"type": kind, **payload})
 
         def run():
             try:
-                q.put({"type": "done", **answer_question(body.question, document_id, emit)})
+                result = answer_question(body.question, document_id, emit)
+                record_interaction(user_id=user_id, kind="ask", request=body.question,
+                                   document_id=document_id, record={**result, "steps": steps})
+                q.put({"type": "done", **{k: v for k, v in result.items() if k != "passages"}})
             except ModelBusy as exc:
                 q.put({"type": "error", "message": str(exc)})
             except Exception as exc:
@@ -472,6 +479,33 @@ def _resolve_document_text(body: RunRequest, user_id: str) -> str:
     return _join_chunks(chunks)[:MAX_DOC_CHARS]
 
 
+@app.get("/reviews/summary")
+def reviews_summary(user_id: str = Depends(get_current_user)):
+    """How the supervisor model rated logged interactions, per model, plus its latest advice."""
+    from engine.reviewer import summarize
+    return summarize(user_id)
+
+
+def _log_run(user_id, body: RunRequest, plan, traces, output, document_text, run_id):
+    from engine.config import LLM_MODEL, PLANNER_MODEL
+    record_interaction(
+        user_id=user_id, kind="run", request=body.request, document_id=body.document_id,
+        record={
+            "run_id": run_id,
+            "goal": plan.goal,
+            "brief": plan.brief.preferences(),
+            "plan": [{"name": s.name, "instructions": s.description,
+                      "input_key": s.input_key, "output_key": s.output_key} for s in plan.steps],
+            "steps": [{"name": t.name, "success": t.success, "error": t.error,
+                       "time_ms": round(t.execution_time_ms),
+                       "tokens": t.input_tokens + t.output_tokens} for t in traces],
+            "output": output,
+            "source": document_text,
+            "models": {"planner": PLANNER_MODEL, "steps": LLM_MODEL},
+        },
+    )
+
+
 @app.post("/run", response_model=RunResponse)
 def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
                  db: Session = Depends(get_db)):
@@ -497,6 +531,7 @@ def run_workflow(body: RunRequest, user_id: str = Depends(get_current_user),
     db.add(run)
     db.commit()
     db.refresh(run)
+    _log_run(user_id, body, plan, traces, output, document_text, run.id)
 
     return RunResponse(run_id=run.id, goal=plan.goal,
                        steps=[StepResult(**s) for s in step_results],
@@ -575,6 +610,7 @@ def run_workflow_stream(body: RunRequest, user_id: str = Depends(get_current_use
                 run_id = run.id
             finally:
                 db.close()
+            _log_run(user_id, body, plan, traces, output, document_text, run_id)
 
             yield f"data: {json.dumps({'type': 'done', 'run_id': run_id, 'goal': plan.goal, 'steps': step_metas, 'output': output, 'total_tokens': total_tokens, 'total_time_ms': total_time_ms}, default=str)}\n\n"
 

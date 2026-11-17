@@ -82,6 +82,25 @@ class WorkflowRun(Base):
     created_at    = Column(DateTime, default=datetime.utcnow)
 
 
+class InteractionLog(Base):
+    """One Ask or workflow run, recorded in full so a supervisor model can review it later."""
+    __tablename__ = "interaction_logs"
+    __table_args__ = {"extend_existing": True}
+
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String, nullable=True, index=True)
+    kind          = Column(String, nullable=False)              # ask | run
+    document_id   = Column(Integer, nullable=True)
+    request       = Column(Text, nullable=False)
+    record_json   = Column(Text, nullable=False)                # everything the reviewer needs
+    review_status = Column(String, default="pending", index=True)  # pending | submitted | reviewed | failed
+    review_batch  = Column(String, nullable=True, index=True)
+    review_json   = Column(Text, nullable=True)
+    review_model  = Column(String, nullable=True)
+    reviewed_at   = Column(DateTime, nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+
 class QuizAttempt(Base):
     """One user's answer to one quiz question (Day 13)."""
     __tablename__ = "quiz_attempts"
@@ -160,6 +179,26 @@ def get_or_create_document(db, *, filename: str, content_type: str,
     db.add(doc)
     db.flush()
     return doc, True
+
+
+def record_interaction(*, user_id, kind: str, request: str, record: dict,
+                       document_id: int | None = None) -> int | None:
+    """Save an interaction for later review. Never raises: logging must not break a request."""
+    import json
+    import logging
+    db = SessionLocal()
+    try:
+        log = InteractionLog(user_id=user_id, kind=kind, request=request, document_id=document_id,
+                             record_json=json.dumps(record, default=str))
+        db.add(log)
+        db.commit()
+        return log.id
+    except Exception:
+        db.rollback()
+        logging.getLogger(__name__).exception("failed to record %s interaction", kind)
+        return None
+    finally:
+        db.close()
 
 
 def store_chunks(db, document_id: int, chunks, embeddings: list) -> int:

@@ -63,6 +63,8 @@ def clean_tables():
     yield
     db = SessionLocal()
     try:
+        from engine.database import InteractionLog
+        db.query(InteractionLog).filter_by(user_id="dev-user").delete()
         db.query(QuizAttempt).filter_by(user_id="dev-user").delete()
         db.query(WorkflowRun).filter_by(user_id="dev-user").delete()
         db.query(Document).filter_by(user_id="dev-user").delete()
@@ -413,6 +415,66 @@ def test_ask_rejects_other_users_documents_and_unready_ones():
         db.close()
     assert client.post(f"/documents/{doc_id}/ask", json={"question": "q"}).status_code == 409
     assert client.post(f"/documents/{doc_id}/ask", json={"question": ""}).status_code == 422
+
+
+# ── Interactions are logged for review ────────────────────────────────────────
+
+def _logs(kind):
+    import json as _json
+
+    from engine.database import InteractionLog
+    db = SessionLocal()
+    try:
+        return [(log, _json.loads(log.record_json))
+                for log in db.query(InteractionLog).filter_by(user_id="dev-user", kind=kind).all()]
+    finally:
+        db.close()
+
+
+def test_ask_is_logged_with_passages_but_passages_are_not_sent_to_the_browser():
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    result = {"answer": "Hi", "verification": "checked",
+              "passages": [{"chunk_id": 1, "text": "Hello"}], "models": {"answer": "m1", "check": "m2"}}
+
+    def fake_answer(question, document_id, emit):
+        emit("step", {"name": "answer", "success": True})
+        return result
+
+    try:
+        with patch("engine.qa.answer_question", side_effect=fake_answer):
+            events = _sse_events(client.post(f"/documents/{doc_id}/ask", json={"question": "greet?"}))
+        assert "passages" not in events[-1]
+        [(log, record)] = _logs("ask")
+        assert log.request == "greet?" and log.document_id == doc_id and log.review_status == "pending"
+        assert record["passages"] == [{"chunk_id": 1, "text": "Hello"}]
+        assert record["steps"] == [{"name": "answer", "success": True}]
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_run_is_logged_with_plan_steps_output_and_source():
+    from engine.schemas import RequestBrief
+    plan = _make_plan()
+    plan.brief = RequestBrief(count=3)
+    with (
+        patch("api.parse_intent", return_value=plan),
+        patch("api.build_node_for_step", return_value=_fake_node()),
+    ):
+        run_id = client.post("/run", json={"document": "Source text.", "request": "summarise"}).json()["run_id"]
+    [(log, record)] = _logs("run")
+    assert log.request == "summarise"
+    assert record["run_id"] == run_id and record["brief"] == {"count": 3}
+    assert record["plan"][0]["instructions"] == "Summarise"
+    assert record["output"] == {"summary": "Integration summary."}
+    assert record["source"] == "Source text."
+    assert record["steps"][0]["success"] is True
+
+
+def test_reviews_summary_endpoint():
+    client.post("/run", json={"document": "x", "request": "r"})  # may fail; summary must still work
+    res = client.get("/reviews/summary")
+    assert res.status_code == 200
+    assert {"logs", "status", "by_kind_and_model", "issues_by_role", "recent_advice"} <= res.json().keys()
 
 
 # ── Workflow retrieval is limited to the run's document ───────────────────────
