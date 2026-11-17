@@ -18,7 +18,7 @@ The interesting part isn't the summary, it's the planner. You don't pick from a 
 - **Ask the document anything.** Facts, why something happened, comparisons, what an idea means. Each answer comes with a justification and exact quotes from the passages it used. Before you see it, the quotes are checked against the text and a second model judges whether they really support the answer. If not, the system re-reads the document for what's missing — new passages only — and revises, up to twice. If it still can't support an answer it says so instead of guessing. Every answer ends with follow-up questions you can click.
 - **Claude as supervisor.** Every conversation turn, Ask and run is logged in full, failures included. Running `/review-logs` in Claude Code fetches the unreviewed logs, and Claude reviews each one the way a teacher marks work: was it correct, grounded in the source, what the user asked for, and did the checker judge it right. Problems are tagged with the role responsible, and Claude writes general lessons for each role, then saves the reviews back to the app. `GET /admin/reviews/summary` aggregates the results per model.
 - **Semantic search** across your uploaded documents.
-- **Practice and export.** Answer the quiz in the browser and track scores over time, or export a run as a PDF or an Anki deck.
+- **One screen.** The Study tab is the whole workflow: pick or upload a document, then talk to it. Answers, summaries, concepts and quizzes appear in the conversation, questions can be answered and checked in place, earlier sessions for the same document can be reopened, and the session or a single turn can be saved as PDF or Word.
 
 ### Available steps
 
@@ -183,7 +183,7 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 
 - **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
 - **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
-- **The old screens are still separate.** The study-session API is built, but the browser UI still shows the separate New Run and Ask screens until the Study screen replaces them. Runs and single Asks have no memory between requests.
+- **Old runs stay viewable, not editable.** The browser now has one Study screen per document. Runs made before it are still listed in History, and the `/run` and `/documents/{id}/ask` endpoints remain for API use, but they have no memory between requests.
 - **Revised answers aren't re-checked.** When `revise` rewrites an answer it's marked unchecked; revised quiz questions get the quote check only.
 - **Auth is optional and currently off** in the deployed build.
 - **No fallback provider.** When a Groq model is rate-limited, the request fails with a "try again" message.
