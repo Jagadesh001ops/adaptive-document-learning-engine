@@ -52,7 +52,8 @@ ANSWER = {"answer": "Gutenberg, around 1440.", "justification": "Passage 1.",
 SUPPORTED = {"supported": True, "problems": [], "missing": None, "search_query": None}
 
 
-def _run(client, message, turns=(), memory=None, remembered=(), whole_text="Whole document text."):
+def _run(client, message, turns=(), memory=None, remembered=(), whole_text="Whole document text.",
+         outline=()):
     events = []
     searches = []
 
@@ -66,7 +67,8 @@ def _run(client, message, turns=(), memory=None, remembered=(), whole_text="Whol
         patch("engine.study.load_chunks", side_effect=lambda doc, ids: [p for p in (P1, P2) if p["chunk_id"] in ids]
               if ids and not remembered else list(remembered)),
         patch("engine.study.spread_chunks", return_value=[dict(P1), dict(P2)]),
-        patch("engine.study.document_text", return_value=whole_text),
+        patch("engine.study.document_text", return_value=(whole_text, [1, 2])),
+        patch("engine.progress.get_outline", return_value=list(outline)),
     ):
         result = study.run_turn(message=message, document_id=7, turns=list(turns), memory=memory,
                                 emit=lambda kind, payload: events.append((kind, payload)))
@@ -183,8 +185,9 @@ def test_revising_a_summary_defaults_to_the_latest_one():
              {"turn": 2, "message": "hello", "blocks": [], "reply": "Hi"}]
     client = FakeClient(_plan(_step("revise", instructions="shorter")), {"text": "Short."})
     result, _, _ = _run(client, "make it shorter", turns=turns)
-    assert result["blocks"][0] == {"type": "summary", "text": "Short.", "scope": None,
-                                   "revised_from": {"turn": 1, "item": None}, "step": 0}
+    assert result["blocks"][0] == {"type": "summary", "text": "Short.", "scope": None, "section": None,
+                                   "chunk_ids": [1, 2], "revised_from": {"turn": 1, "item": None},
+                                   "step": 0}
 
 
 # ── memory ────────────────────────────────────────────────────────────────────
@@ -265,3 +268,51 @@ def test_a_short_rate_limit_is_waited_out_once():
     with patch("engine.llm_nodes.get_client", return_value=client), patch("engine.qa.time.sleep"):
         with pytest.raises(qa.ModelBusy):
             qa.chat_text("m", "s", "u")
+
+
+# ── sections ──────────────────────────────────────────────────────────────────
+
+OUTLINE = [{"section": 1, "title": "Print arrives", "chunk_ids": [1, 2], "pages": [1, 2]}]
+
+
+def test_a_step_can_read_one_section_of_the_outline():
+    client = FakeClient(
+        _plan(_step("summarize", scope="section", section=1),
+              _step("quiz", count=1, scope="section", section=1)),
+        "- Gutenberg and the Church",
+        {"items": [_quiz_item()]},
+    )
+    result, events, searches = _run(client, "Summarize section 1 and quiz me on it", outline=OUTLINE)
+
+    assert result["error"] is None
+    assert "Sections of the document:" in client.calls[0]["user"]
+    assert "1. Print arrives (about pages 1-2)" in client.calls[0]["user"]
+    assert "Gutenberg built the printing press" in client.calls[1]["user"]
+    assert "Index of Prohibited Books" in client.calls[1]["user"], "the whole section is read"
+    summary, quiz = result["blocks"]
+    assert summary["section"] == 1 and summary["chunk_ids"] == [1, 2]
+    assert quiz["section"] == 1 and quiz["scope"] == "section"
+    assert searches == [], "a named section is read directly, not searched for"
+    assert [p["name"] for k, p in events if k == "step"].count("read section") == 2
+    assert result["outline"] == [{"section": 1, "title": "Print arrives", "pages": [1, 2]}]
+
+
+def test_an_unknown_section_falls_back_to_a_topic_search():
+    client = FakeClient(_plan(_step("summarize", scope="section", section=9)), "- summary")
+    result, _, searches = _run(client, "Summarize section 9", outline=OUTLINE)
+    assert result["error"] is None and searches == ["printing press"]
+
+
+def test_the_first_turn_maps_the_document_once():
+    client = FakeClient(_plan(reply="Hi!"))
+    calls = []
+
+    def outline(document_id, build=True):
+        calls.append(build)
+        return None if not build else OUTLINE
+
+    with patch("engine.progress.get_outline", side_effect=outline):
+        with (patch("engine.llm_nodes.get_client", return_value=client)):
+            result = study.run_turn(message="hi", document_id=7, turns=[], emit=None)
+    assert calls == [False, True]
+    assert [s["name"] for s in result["steps"]] == ["map sections", "plan"]

@@ -1,16 +1,14 @@
 import { useState } from "react"
 // import { supabase } from "./lib/supabase"
 // import Auth from "./components/Auth"
-import SubmitRun from "./components/SubmitRun"
 import Results from "./components/Results"
 import RunHistory from "./components/RunHistory"
 import Library from "./components/Library"
 import Search from "./components/Search"
-import Ask from "./components/Ask"
+import Study from "./components/Study"
 
 const TABS = [
-  { id: "submit",  label: "New Run" },
-  { id: "ask",     label: "Ask" },
+  { id: "study",   label: "Study" },
   { id: "library", label: "Library" },
   { id: "search",  label: "Search" },
   { id: "history", label: "History" },
@@ -18,10 +16,9 @@ const TABS = [
 
 export default function App() {
   // const [session, setSession] = useState(undefined)
-  const [screen, setScreen] = useState("submit")
+  const [screen, setScreen] = useState("study")
   const [currentRun, setCurrentRun] = useState(null)
-  const [selectedDoc, setSelectedDoc] = useState(null)
-  const [askDoc, setAskDoc] = useState(null)
+  const [studyTask, setStudyTask] = useState(null)
 
   // Auth disabled temporarily — uncomment to re-enable
   // useEffect(() => {
@@ -34,19 +31,11 @@ export default function App() {
   // if (session === undefined) return null
   // if (!session) return <Auth />
 
-  function handleRunComplete(run) {
-    setCurrentRun(run)
-    setScreen("results")
-  }
-
-  function handleSelectDoc(doc) {
-    setSelectedDoc(doc)
-    setScreen("submit")
-  }
-
-  function handleAskDoc(doc) {
-    setAskDoc(doc)
-    setScreen("ask")
+  // A suggested task picked in Library opens Study and runs it.
+  function startTask(doc, next) {
+    setStudyTask({ doc, message: next?.message ?? null, session_id: next?.session_id ?? null,
+                   turn: next?.turn ?? null, id: Date.now() })
+    setScreen("study")
   }
 
   return (
@@ -74,20 +63,13 @@ export default function App() {
       </nav>
 
       <main className="max-w-3xl mx-auto px-6 py-10">
-        {screen === "submit" && (
-          <SubmitRun
-            onRunComplete={handleRunComplete}
-            prefillDoc={selectedDoc}
-            onClearDoc={() => setSelectedDoc(null)}
-          />
-        )}
+        {screen === "study" && <Study task={studyTask} onTask={setStudyTask} />}
         {screen === "results" && (
-          <Results run={currentRun} onNewRun={() => setScreen("submit")} />
+          <Results run={currentRun} onBack={() => setScreen("history")} />
         )}
         {screen === "library" && (
-          <Library onSelectDoc={handleSelectDoc} onAskDoc={handleAskDoc} />
+          <Library onStartTask={startTask} />
         )}
-        {screen === "ask" && <Ask doc={askDoc} onPickDoc={setAskDoc} />}
         {screen === "search" && <Search />}
         {screen === "history" && (
           <RunHistory onSelectRun={(run) => { setCurrentRun(run); setScreen("results") }} />

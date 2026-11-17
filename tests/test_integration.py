@@ -773,3 +773,84 @@ def test_deleting_a_session_or_its_document_removes_the_conversation():
         assert db.query(StudyMessage).filter(StudyMessage.session_id.in_([sid, keep])).count() == 0
     finally:
         db.close()
+
+
+# ── Quiz answers and progress ─────────────────────────────────────────────────
+
+def _quiz_turn(chunk_ids):
+    def fake(message, document_id, turns, memory, emit):
+        items = [{"question": f"Q{i + 1}", "options": {"A": "a", "B": "b"}, "answer": "A",
+                  "citation": {"chunk_id": c, "excerpt": "x"}} for i, c in enumerate(chunk_ids)]
+        block = {"type": "quiz", "items": items, "step": 0, "scope": "topic"}
+        return {**_fake_turn(message, document_id, turns, memory, emit), "blocks": [block]}
+    return fake
+
+
+def _chunk_ids(doc_id):
+    from engine.database import DocumentChunk
+    db = SessionLocal()
+    try:
+        return [c for (c,) in db.query(DocumentChunk.id).filter_by(document_id=doc_id)
+                .order_by(DocumentChunk.chunk_index)]
+    finally:
+        db.close()
+
+
+def test_quiz_answers_are_graded_stored_and_drive_progress():
+    doc_id = _library_doc(chunks=[(0, 5, "Alpha"), (5, 10, "Beta")])
+    try:
+        first, second = _chunk_ids(doc_id)
+        with patch("engine.progress._titles", return_value=["Alpha part", "Beta part"]):
+            fresh = client.get(f"/documents/{doc_id}/progress").json()
+            assert [s["title"] for s in fresh["sections"]] == ["Alpha part", "Beta part"]
+            assert fresh["next"]["kind"] == "overview" and fresh["latest_session_id"] is None
+
+            sid = _new_session(doc_id)
+            with patch("engine.study.run_turn", side_effect=_quiz_turn([first, second])):
+                _sse_events(client.post(f"/sessions/{sid}/messages", json={"message": "quiz me"}))
+            assert client.get(f"/documents/{doc_id}/progress").json()["next"]["kind"] == "finish_quiz"
+
+            res = client.post(f"/sessions/{sid}/quiz-answers",
+                              json={"turn": 1, "step": 0, "answers": {"1": "a", "2": "B"}})
+            assert res.status_code == 200, res.text
+            assert res.json()["correct"] == 1 and res.json()["total"] == 2
+
+            block = client.get(f"/sessions/{sid}").json()["turns"][0]["blocks"][0]
+            assert block["answers"] == {"1": "A", "2": "B"}, "a reopened quiz shows its answers"
+
+            body = client.get(f"/documents/{doc_id}/progress").json()
+        assert body["done"]["answered"] == 2 and body["done"]["correct"] == 1
+        assert body["next"]["kind"] == "revisit" and body["next"]["section"] == 2
+        assert body["sections"][1]["wrong"] == 1 and body["latest_session_id"] == sid
+
+        assert client.post(f"/sessions/{sid}/quiz-answers",
+                           json={"turn": 1, "step": 3, "answers": {"1": "A"}}).status_code == 404
+        assert client.post(f"/sessions/{sid}/quiz-answers",
+                           json={"turn": 1, "step": 0, "answers": {"7": "A"}}).status_code == 422
+        assert client.delete(f"/sessions/{sid}").status_code == 204
+        db = SessionLocal()
+        try:
+            assert db.query(QuizAttempt).filter_by(session_id=sid).count() == 0
+        finally:
+            db.close()
+    finally:
+        _cleanup_doc(doc_id)
+
+
+def test_progress_needs_an_owned_ready_document():
+    other = _library_doc(user_id="someone-else", chunks=[(0, 5, "Hello")])
+    try:
+        assert client.get(f"/documents/{other}/progress").status_code == 404
+    finally:
+        _cleanup_doc(other)
+    doc_id = _library_doc(chunks=[(0, 5, "Hello")])
+    try:
+        db = SessionLocal()
+        try:
+            db.query(Document).filter_by(id=doc_id).update({"status": "processing"})
+            db.commit()
+        finally:
+            db.close()
+        assert client.get(f"/documents/{doc_id}/progress").status_code == 409
+    finally:
+        _cleanup_doc(doc_id)

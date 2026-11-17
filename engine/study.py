@@ -57,7 +57,8 @@ class TurnStep(BaseModel):
     difficulty: Optional[str] = None
     format: Optional[str] = None
     length: Optional[str] = None
-    scope: Literal["whole", "topic"] = "topic"
+    scope: Literal["whole", "topic", "section"] = "topic"
+    section: Optional[int] = None           # scope "section": which section of the outline
     uses_previous_step: bool = False        # build on the previous step's output in this turn
     target_turn: Optional[int] = None       # revise: which earlier turn
     target_item: Optional[int] = None       # revise: question number to change, None = all of it
@@ -68,9 +69,9 @@ class TurnStep(BaseModel):
     @field_validator("scope", mode="before")
     @classmethod
     def _scope(cls, v):
-        return v if v in ("whole", "topic") else "topic"
+        return v if v in ("whole", "topic", "section") else "topic"
 
-    @field_validator("target_turn", "target_item", mode="before")
+    @field_validator("section", "target_turn", "target_item", mode="before")
     @classmethod
     def _int_or_none(cls, v):
         try:
@@ -113,7 +114,8 @@ Return ONLY a JSON object:
   "steps": [
     {"tool": "answer", "instructions": "...", "question": "the question, standalone",
      "count": null, "difficulty": null, "format": null, "length": null,
-     "scope": "topic", "uses_previous_step": false, "target_turn": null, "target_item": null}
+     "scope": "topic", "section": null, "uses_previous_step": false, "target_turn": null,
+     "target_item": null}
   ],
   "reply": null
 }
@@ -126,7 +128,9 @@ Rules:
   quiz has count 3 and difficulty "hard". Never copy a number from one step to another, and
   never invent settings the user didn't state.
 - scope "whole" when the step is about the whole document ("summarize this", "quiz me on the
-  chapter"); "topic" when it is about a specific topic.
+  chapter"); "section" with the section number when the user names a section of the outline,
+  by number, title or pages ("summarize section 3", "quiz me on pages 9-12"); "topic" when it
+  is about a specific topic.
 - instructions: a direct instruction to that step carrying over what the user asked for it.
 - Use the conversation to resolve references. "Quiz me on that" after an answer about the
   printing press is a quiz step on the printing press.
@@ -137,9 +141,11 @@ Rules:
   steps and put a short, friendly reply or clarifying question in "reply"."""
 
 
-def plan_turn(message: str, history: str) -> tuple[TurnPlan, int]:
+def plan_turn(message: str, history: str, outline: str = "") -> tuple[TurnPlan, int]:
     from .qa import _chat
-    user = (f"Conversation so far:\n{history}\n\n" if history else "") + f"New message: {message}"
+    user = ((f"Sections of the document:\n{outline}\n\n" if outline else "")
+            + (f"Conversation so far:\n{history}\n\n" if history else "")
+            + f"New message: {message}")
     data, tokens = _chat(PLANNER_MODEL, _PLANNER_SYSTEM, user, json_mode=True)
     plan = TurnPlan(**{k: v for k, v in data.items() if k in TurnPlan.model_fields})
     if not plan.search_query:
@@ -230,13 +236,11 @@ def spread_chunks(document_id: int, n: int) -> List[dict]:
                 .order_by(DocumentChunk.chunk_index).all())
     finally:
         db.close()
-    if len(rows) > n:
-        step = len(rows) / n
-        rows = [rows[int(i * step)] for i in range(n)]
-    return [_chunk_dict(r) for r in rows]
+    return [_chunk_dict(r) for r in spread(rows, n)]
 
 
-def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS) -> str:
+def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS) -> tuple[str, List[int]]:
+    """The document's text, cut at max_chars, and the chunks that made it in."""
     from .chunking import join_chunks
     from .database import DocumentChunk, SessionLocal
     db = SessionLocal()
@@ -245,7 +249,22 @@ def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS) -> str:
                 .order_by(DocumentChunk.chunk_index).all())
     finally:
         db.close()
-    return join_chunks(rows)[:max_chars]
+    start = rows[0].char_start if rows else 0
+    used = [r.id for r in rows if r.char_start - start < max_chars]
+    return join_chunks(rows)[:max_chars], used
+
+
+class _Row:
+    """A chunk dict seen as a row, for join_chunks."""
+    def __init__(self, p: dict):
+        self.text, self.char_start, self.char_end = p["text"], p["char_start"], p["char_end"]
+
+
+def spread(items: list, n: int) -> list:
+    if len(items) <= n:
+        return list(items)
+    step = len(items) / n
+    return [items[int(i * step)] for i in range(n)]
 
 
 # ── turn runner ───────────────────────────────────────────────────────────────
@@ -254,8 +273,9 @@ class Turn:
     """Runs one planned turn, emitting progress and collecting what the reviewer needs."""
 
     def __init__(self, *, message: str, document_id: int, turns: List[dict], keeper: ContextKeeper,
-                 emit: Optional[Emit] = None):
+                 emit: Optional[Emit] = None, outline: Optional[List[dict]] = None):
         self.message = message
+        self.outline = outline or []
         self.document_id = document_id
         self.turns = turns
         self.keeper = keeper
@@ -298,6 +318,17 @@ class Turn:
             self._search_cache[query] = self.step("find passages", find, lambda r: f"{len(r)} passages")
         return self._read(self._search_cache[query])
 
+    def section(self, step: TurnStep) -> Optional[dict]:
+        """The outline section a step is about, if it names a valid one."""
+        if step.scope != "section" or step.section is None:
+            return None
+        return next((s for s in self.outline if s["section"] == step.section), None)
+
+    def section_passages(self, sec: dict, limit: Optional[int] = None) -> List[dict]:
+        ids = spread(sec["chunk_ids"], limit) if limit else sec["chunk_ids"]
+        return self.step("read section", lambda: (load_chunks(self.document_id, ids), 0),
+                         lambda r: f"section {sec['section']}: {len(r)} passages")
+
     # tools --------------------------------------------------------------------
     def run(self, plan: TurnPlan) -> None:
         previous: Optional[dict] = None
@@ -317,9 +348,13 @@ class Turn:
         history = self.history
         if previous:
             history += f"\n(Earlier in this turn: {block_text(previous, 800)})"
+        extra = self.keeper.passages()
+        sec = self.section(step)
+        if sec:
+            extra = self.section_passages(sec, 3) + extra
         result = answer_question(question, self.document_id, self._record,
                                  search_query=plan.search_query, history=history,
-                                 extra_passages=self.keeper.passages())
+                                 extra_passages=extra)
         self.tokens += result.pop("total_tokens", 0)
         for p in result.pop("passages", []):
             self.passages.setdefault(p["chunk_id"], p)
@@ -328,9 +363,14 @@ class Turn:
 
     def _worker_input(self, step: TurnStep, plan: TurnPlan, previous: Optional[dict]):
         if step.scope == "whole" and not previous:
-            text = document_text(self.document_id)
+            text, used = document_text(self.document_id)
             self.sources["document"] = text
-            return text, []
+            return text, [{"chunk_id": c} for c in used]
+        sec = None if previous else self.section(step)
+        if sec:
+            from .chunking import join_chunks
+            passages = self._read(self.section_passages(sec))
+            return join_chunks([_Row(p) for p in passages])[:MAX_DOC_CHARS], passages
         passages = self.topic_passages(plan.search_query)
         text = "\n\n".join(p["text"] for p in passages)
         if previous:
@@ -348,8 +388,11 @@ class Turn:
         system, user = node._build_messages({"document": source})
         text = self.step(kind, lambda: chat_text(LLM_MODEL, system, user),
                          lambda r: f"{len(r.split())} words")
-        self.keeper.remember([p["chunk_id"] for p in passages])
-        return {"type": kind, "text": text.strip(), "scope": step.scope}
+        ids = [p["chunk_id"] for p in passages]
+        if step.scope != "whole":
+            self.keeper.remember(ids)
+        return {"type": kind, "text": text.strip(), "scope": step.scope, "section": step.section,
+                "chunk_ids": ids}
 
     def _summarize(self, step, plan, previous):
         from .llm_nodes import SummarizeNode
@@ -362,10 +405,13 @@ class Turn:
     def _quiz(self, step: TurnStep, plan: TurnPlan, previous: Optional[dict]) -> dict:
         from .llm_nodes import GenerateQuizNode, StepContext, attach_citations
         from .qa import chat_text, parse_json
+        sec = None if previous else self.section(step)
         if step.scope == "whole" and not previous:
             passages = self.step("find passages", lambda: (spread_chunks(self.document_id, WHOLE_DOC_PASSAGES), 0),
                                  lambda r: f"{len(r)} passages across the document")
             self._read(passages)
+        elif sec:
+            passages = self._read(self.section_passages(sec, WHOLE_DOC_PASSAGES))
         else:
             passages = self.topic_passages(plan.search_query)
         if not passages:
@@ -391,7 +437,8 @@ class Turn:
 
         items = self.step("quiz", write, lambda r: f"{len(r)} questions")
         self.keeper.remember([(q.get("citation") or {}).get("chunk_id") for q in items])
-        return {"type": "quiz", "items": items, "difficulty": node._settings()[1]}
+        return {"type": "quiz", "items": items, "difficulty": node._settings()[1],
+                "scope": step.scope, "section": step.section}
 
     def _revise(self, step: TurnStep, plan: TurnPlan, previous: Optional[dict]) -> dict:
         from .qa import _chat
@@ -447,13 +494,15 @@ class Turn:
                 new_items = [q for q in data.get("items") or [] if isinstance(q, dict)]
                 attach_citations(new_items, passages)
             return {"type": "quiz", "items": new_items, "difficulty": block.get("difficulty"),
+                    "scope": block.get("scope"), "section": block.get("section"),
                     "revised_from": revised_from}
         if block["type"] == "answer":
             return {**block, "answer": data.get("answer") or block.get("answer"),
                     "justification": data.get("justification") or block.get("justification"),
                     "verification": "unchecked", "revised_from": revised_from}
         return {"type": block["type"], "text": data.get("text") or block.get("text"),
-                "scope": block.get("scope"), "revised_from": revised_from}
+                "scope": block.get("scope"), "section": block.get("section"),
+                "chunk_ids": [p["chunk_id"] for p in passages], "revised_from": revised_from}
 
     def _find_target(self, step: TurnStep, previous: Optional[dict]):
         if previous:
@@ -476,12 +525,19 @@ def run_turn(*, message: str, document_id: int, turns: List[dict], memory: Optio
     """Plan and run one turn. Always returns a result; failures are reported in "error"."""
     from .qa import ModelBusy
     emit = emit or (lambda *_: None)
+    from .progress import get_outline, outline_text
     keeper = ContextKeeper(document_id, memory)
     turn = Turn(message=message, document_id=document_id, turns=turns, keeper=keeper, emit=emit)
     plan, error = None, None
     t0 = time.perf_counter()
     try:
-        plan = turn.step("plan", lambda: plan_turn(message, turn.history),
+        outline = get_outline(document_id, build=False)
+        if outline is None:   # first turn on this document: map its sections once
+            outline = turn.step("map sections", lambda: (get_outline(document_id), 0),
+                                lambda r: f"{len(r)} sections")
+        turn.outline = outline or []
+        plan = turn.step("plan", lambda: plan_turn(message, turn.history,
+                                                   outline_text(turn.outline)),
                          lambda p: " -> ".join(s.tool for s in p.steps) or "reply")
         emit("plan", {"goal": plan.goal, "steps": [s.model_dump() for s in plan.steps]})
         if plan.steps:
@@ -508,6 +564,7 @@ def run_turn(*, message: str, document_id: int, turns: List[dict], memory: Optio
         "sources": turn.sources,
         "targets": turn.targets,
         "memory": keeper.to_json(),
+        "outline": [{k: sec.get(k) for k in ("section", "title", "pages")} for sec in turn.outline],
         "total_tokens": turn.tokens,
         "time_ms": round((time.perf_counter() - t0) * 1000),
         "models": {"planner": PLANNER_MODEL, "steps": LLM_MODEL, "answer": ANSWER_MODEL,

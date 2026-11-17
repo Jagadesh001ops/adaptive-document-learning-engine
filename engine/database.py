@@ -44,6 +44,7 @@ class Document(Base):
     content_hash  = Column(String(64), nullable=False, index=True)  # unique per user
     status        = Column(String, default="ready")   # processing | ready | failed
     error_message = Column(Text, nullable=True)
+    outline_json  = Column(Text, nullable=True)   # sections with titles, built on first use
     created_at    = Column(DateTime, default=datetime.utcnow)
 
 
@@ -129,13 +130,17 @@ class StudyMessage(Base):
 
 
 class QuizAttempt(Base):
-    """One user's answer to one quiz question (Day 13)."""
+    """One user's answer to one quiz question, from a run or from a study session's quiz."""
     __tablename__ = "quiz_attempts"
     __table_args__ = {"extend_existing": True}
 
     id            = Column(Integer, primary_key=True, index=True)
     user_id       = Column(String, nullable=False, index=True)
     run_id        = Column(Integer, nullable=True, index=True)   # workflow run that generated the quiz
+    session_id    = Column(Integer, nullable=True, index=True)   # or the study session, turn and
+    turn          = Column(Integer, nullable=True)               # step whose quiz block it answers
+    step          = Column(Integer, nullable=True)
+    chunk_id      = Column(Integer, nullable=True)               # passage the question was written from
     question_idx  = Column(Integer, nullable=False)              # 0-based index within quiz
     question_text = Column(Text, nullable=False)
     chosen_answer = Column(String(1), nullable=False)            # A/B/C/D

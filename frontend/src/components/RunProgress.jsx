@@ -39,34 +39,3 @@ export function DocumentStatus({ doc, now }) {
     </ol>
   )
 }
-
-export function RunProgress({ pipeline, now }) {
-  const planning = pipeline.phase === "planning"
-  const planDetail = planning
-    ? `working out the steps · ${seconds(now - pipeline.startedAt)}`
-    : `${pipeline.steps.length} step${pipeline.steps.length === 1 ? "" : "s"}`
-
-  return (
-    <div className="space-y-2">
-      {pipeline.goal && <p className="text-xs text-gray-400">{pipeline.goal}</p>}
-      <ol className="border border-gray-800 rounded-lg divide-y divide-gray-800 font-mono text-xs">
-        <StepRow index={0} name="plan" status={planning ? "running" : "done"} detail={planDetail} />
-        {pipeline.steps.map((s, i) => (
-          <StepRow
-            key={s.name}
-            index={i + 1}
-            name={s.name}
-            flow={`${s.input_key} → ${s.output_key}`}
-            status={s.status}
-            error={s.error}
-            detail={
-              s.status === "running" ? seconds(now - s.startedAt)
-                : s.status === "done" ? `${seconds(s.time_ms)} · ${s.tokens} tok`
-                : s.status
-            }
-          />
-        ))}
-      </ol>
-    </div>
-  )
-}

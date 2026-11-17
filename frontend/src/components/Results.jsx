@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { apiFetch } from '../lib/api'
+import { download } from '../lib/download'
+import Quiz from './Quiz'
 
 function renderValue(val) {
   if (val === null || val === undefined) return null
@@ -9,7 +10,7 @@ function renderValue(val) {
   if (Array.isArray(val)) {
     // quiz items?
     if (val.length && typeof val[0] === 'object' && val[0].question) {
-      return <QuizDisplay items={val} />
+      return <Quiz items={val} />
     }
     // citations?
     if (val.length && typeof val[0] === 'object' && val[0].chunk_id !== undefined) {
@@ -37,74 +38,7 @@ function CitationList({ items }) {
   )
 }
 
-function QuizDisplay({ items }) {
-  const [selected, setSelected] = useState({})
-  const [submitted, setSubmitted] = useState(false)
-
-  const toggle = (qi, letter) => {
-    if (submitted) return
-    setSelected(s => ({ ...s, [qi]: letter }))
-  }
-
-  const score = submitted
-    ? items.reduce((n, item, i) => n + (selected[i] === item.answer ? 1 : 0), 0)
-    : null
-
-  return (
-    <div className="space-y-4">
-      {items.map((item, qi) => {
-        const correct = item.answer
-        const chose = selected[qi]
-        return (
-          <div key={qi} className="bg-gray-850 border border-gray-700 rounded-lg p-3">
-            <p className="text-sm font-medium mb-2">{qi + 1}. {item.question}</p>
-            {item.verified === false && (
-              <span className="text-xs text-red-400 mb-1 block">⚠ Flagged by verifier</span>
-            )}
-            <div className="space-y-1">
-              {Object.entries(item.options || {}).map(([letter, text]) => {
-                let cls = 'cursor-pointer border rounded px-3 py-1.5 text-sm flex gap-2 transition '
-                if (!submitted) {
-                  cls += chose === letter
-                    ? 'border-blue-500 bg-blue-900/30 text-white'
-                    : 'border-gray-700 text-gray-300 hover:border-gray-500'
-                } else {
-                  if (letter === correct) cls += 'border-green-500 bg-green-900/20 text-green-300'
-                  else if (letter === chose) cls += 'border-red-500 bg-red-900/20 text-red-300'
-                  else cls += 'border-gray-800 text-gray-500'
-                }
-                return (
-                  <div key={letter} className={cls} onClick={() => toggle(qi, letter)}>
-                    <span className="font-mono font-bold">{letter}.</span> {text}
-                  </div>
-                )
-              })}
-            </div>
-            {submitted && item.explanation && (
-              <p className="text-xs text-gray-400 mt-2 italic">{item.explanation}</p>
-            )}
-          </div>
-        )
-      })}
-
-      {!submitted ? (
-        <button
-          onClick={() => setSubmitted(true)}
-          disabled={Object.keys(selected).length < items.length}
-          className="text-sm px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 rounded-md text-white transition"
-        >
-          Submit Quiz
-        </button>
-      ) : (
-        <div className="text-sm font-medium text-green-400">
-          Score: {score}/{items.length} ({Math.round(score/items.length*100)}%)
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default function Results({ run, onNewRun }) {
+export default function Results({ run, onBack }) {
   const [exporting, setExporting] = useState(null)
 
   if (!run) return null
@@ -112,15 +46,7 @@ export default function Results({ run, onNewRun }) {
   const downloadExport = async (format) => {
     setExporting(format)
     try {
-      const res = await apiFetch(`/runs/${run.run_id}/export/${format}`)
-      if (!res.ok) throw new Error(await res.text())
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `study-kit-${run.run_id}.${format === 'anki' ? 'apkg' : format}`
-      a.click()
-      URL.revokeObjectURL(url)
+      await download(`/runs/${run.run_id}/export/${format}`, `study-kit-${run.run_id}.${format === 'anki' ? 'apkg' : format}`)
     } catch (e) {
       alert(`Export failed: ${e.message}`)
     } finally {
@@ -159,10 +85,10 @@ export default function Results({ run, onNewRun }) {
             {exporting === 'anki' ? 'Exporting…' : 'Anki'}
           </button>
           <button
-            onClick={onNewRun}
+            onClick={onBack}
             className="text-sm px-3 py-1.5 border border-gray-700 rounded-md text-gray-300 hover:text-white hover:border-gray-500 transition whitespace-nowrap"
           >
-            New Run
+            Back
           </button>
         </div>
       </div>
