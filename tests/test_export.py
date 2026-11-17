@@ -107,9 +107,23 @@ TURNS = [
 ]
 
 
-def test_session_pdf_lays_out_each_turn_with_one_answer_key():
+@pytest.fixture(params=["installed", "Helvetica"])
+def pdf_font(request):
+    """Run with whatever TrueType font this machine has, and with the built-in fallback
+    (what a server without Carlito or Calibri uses)."""
+    import engine.export as exp
+    if request.param == "Helvetica":
+        with patch.dict(exp._font_cache, {"name": "Helvetica"}):
+            yield request.param
+    else:
+        yield request.param
+
+
+def test_session_pdf_lays_out_each_turn_with_one_answer_key(pdf_font):
     import engine.export as exp
     text = _pdf_text(exp.export_session("pdf", "My session", "print.pdf", TURNS))
+    assert "?" not in text.replace("Who invented the printing press?", "").replace(
+        "Why did the Church fear print?", ""), "no characters lost to the fallback font"
     assert "My session" in text and "print.pdf" in text
     assert "Why did the Church fear print?" in text and "From the document" in text
     assert "feared printed books spread heresy" in text and "Beyond the document" in text

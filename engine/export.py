@@ -162,7 +162,8 @@ _font_cache: dict = {}
 # Characters the built-in Helvetica can't show, for when no TrueType font is installed.
 _ASCII = str.maketrans({0x2011: "-", 0x2010: "-", 0x2012: "-", 0x2013: "-", 0x2014: "-",
                         0x2212: "-", 0x2018: "'", 0x2019: "'", 0x201C: '"', 0x201D: '"',
-                        0x2026: "...", 0x00A0: " ", 0x202F: " ", 0x2009: " "})
+                        0x2026: "...", 0x00A0: " ", 0x202F: " ", 0x2009: " ", 0x2002: " ",
+                        0x2003: " ", 0x2007: " ", 0x2008: " ", 0x200A: " "})
 
 
 def _pdf_font() -> str:
