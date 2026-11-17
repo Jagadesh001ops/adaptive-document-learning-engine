@@ -30,6 +30,9 @@ WORKDIR /app
 # Non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
+# Carlito: metric-compatible with Calibri, so PDF exports look like Word documents.
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-crosextra-carlito && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /install /usr/local
 COPY . .
 COPY --from=frontend-builder /frontend/dist ./frontend/dist

@@ -52,7 +52,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold tracking-tight">AI Workflow Engine</h1>
+        <h1 className="text-lg font-semibold tracking-tight">Adaptive Document Learning Engine</h1>
         <div className="flex items-center gap-3">
           <div className="flex gap-1">
             {TABS.map(t => (

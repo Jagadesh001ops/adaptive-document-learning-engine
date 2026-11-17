@@ -113,22 +113,42 @@ def _format_passages(passages: List[dict]) -> str:
     return "\n\n".join(f"[chunk_id={p['chunk_id']}]\n{p['text']}" for p in passages)
 
 
-def _chat(model: str, system: str, user: str, json_mode: bool = False):
+RETRY_WAIT_MAX = 20   # seconds; wait out short rate limits once instead of failing
+
+
+def _retry_after(exc) -> float | None:
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    try:
+        return float(headers.get("retry-after"))
+    except (TypeError, ValueError):
+        return None
+
+
+def chat_text(model: str, system: str, user: str, json_mode: bool = False) -> tuple[str, int]:
+    """One chat call. Returns (text, tokens). Waits out one short rate limit, else raises ModelBusy."""
     from .llm_nodes import get_client
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
-    try:
-        resp = get_client().chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            **kwargs,
-        )
-    except Exception as exc:
-        if type(exc).__name__ == "RateLimitError":
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    for attempt in range(2):
+        try:
+            resp = get_client().chat.completions.create(model=model, messages=messages, **kwargs)
+            break
+        except Exception as exc:
+            if type(exc).__name__ != "RateLimitError":
+                raise
+            wait = _retry_after(exc)
+            if attempt == 0 and wait is not None and wait <= RETRY_WAIT_MAX:
+                time.sleep(wait)
+                continue
             raise ModelBusy("The model is busy (free-tier rate limit). Try again in a minute.") from exc
-        raise
     usage = getattr(resp, "usage", None)
     tokens = (usage.prompt_tokens + usage.completion_tokens) if usage else 0
-    return parse_json(resp.choices[0].message.content), tokens
+    return resp.choices[0].message.content or "", tokens
+
+
+def _chat(model: str, system: str, user: str, json_mode: bool = False):
+    text, tokens = chat_text(model, system, user, json_mode)
+    return parse_json(text), tokens
 
 
 def _step(emit: Emit, name: str, fn, detail=lambda r: None):
@@ -152,18 +172,32 @@ def _new_passages(retrieve, query: str, document_id: int, already_read: set):
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 
-def answer_question(question: str, document_id: int, emit: Optional[Emit] = None) -> dict:
+def answer_question(question: str, document_id: int, emit: Optional[Emit] = None, *,
+                    search_query: Optional[str] = None, extra_passages: Optional[List[dict]] = None,
+                    history: str = "") -> dict:
+    """Answer *question* from the document, checking and revising the answer.
+
+    search_query: what to search for, when the question leans on earlier turns ("why did that happen?").
+    extra_passages: passages remembered from earlier in the conversation, read alongside the search results.
+    history: the conversation so far, used only to understand what the question refers to.
+    """
     from .retrieval_node import retrieve_chunks
     emit = emit or (lambda *_: None)
     total = 0
 
-    passages, _ = _step(emit, "find passages",
-                        lambda: (retrieve_chunks(query=question, document_id=document_id, top_k=TOP_K), 0),
-                        lambda r: f"{len(r)} passages")
+    def _find():
+        found = retrieve_chunks(query=search_query or question, document_id=document_id, top_k=TOP_K)
+        seen = {p["chunk_id"] for p in found}
+        found += [p for p in (extra_passages or []) if p["chunk_id"] not in seen][:2]
+        return found, 0
+
+    passages, _ = _step(emit, "find passages", _find, lambda r: f"{len(r)} passages")
     read = {p["chunk_id"]: p for p in passages}   # every passage read so far
     current = list(passages)                      # passages the current answer is based on
 
-    first_msg = f"Question: {question}\n\nPassages:\n{_format_passages(current)}"
+    context = ("Conversation so far (only to understand what the question refers to; "
+               f"answer from the passages):\n{history}\n\n") if history else ""
+    first_msg = f"{context}Question: {question}\n\nPassages:\n{_format_passages(current)}"
     answer, t = _step(emit, "answer", partial(_chat, ANSWER_MODEL, _ANSWER_SYSTEM, first_msg, json_mode=True),
                       lambda r: r.get("status"))
     total += t
@@ -204,7 +238,7 @@ def answer_question(question: str, document_id: int, emit: Optional[Emit] = None
 
         previous = json.dumps({k: answer.get(k) for k in ("answer", "justification", "citations", "status")})
         issues = "\n".join(f"- {p}" for p in problems)
-        revise_msg = (f"Question: {question}\n\nPrevious answer:\n{previous}\n\n"
+        revise_msg = (f"{context}Question: {question}\n\nPrevious answer:\n{previous}\n\n"
                       f"Problems:\n{issues}\n\nPassages:\n{_format_passages(current)}")
         answer, t = _step(emit, f"revise ({n})" if n > 1 else "revise",
                           partial(_chat, ANSWER_MODEL, _ANSWER_SYSTEM + _REVISE_NOTE, revise_msg, json_mode=True),

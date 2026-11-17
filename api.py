@@ -27,16 +27,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from engine.auth import get_current_user
+from engine.chunking import join_chunks
 from engine.database import (
     MAX_DOCS_PER_USER,
     Document,
     DocumentChunk,
     QuizAttempt,
     SessionLocal,
+    StudyMessage,
+    StudySession,
     WorkflowRun,
     get_or_create_document,
     init_db,
@@ -58,7 +61,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="AI Workflow Engine", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Adaptive Document Learning Engine", version="1.1.0", lifespan=lifespan)
 
 # ─── Maintenance mode ─────────────────────────────────────────────────────────
 # Set MAINTENANCE_MODE=1 to block all traffic with 503 (health/metrics exempt).
@@ -286,6 +289,10 @@ def delete_document(document_id: int, user_id: str = Depends(get_current_user)):
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         db.query(DocumentChunk).filter_by(document_id=document_id).delete()
+        session_ids = [sid for (sid,) in db.query(StudySession.id).filter_by(document_id=document_id)]
+        if session_ids:
+            db.query(StudyMessage).filter(StudyMessage.session_id.in_(session_ids)).delete()
+            db.query(StudySession).filter(StudySession.id.in_(session_ids)).delete()
         db.delete(doc)
         db.commit()
     finally:
@@ -326,12 +333,17 @@ def ask_document(document_id: int, body: AskRequest, user_id: str = Depends(get_
                 record_interaction(user_id=user_id, kind="ask", request=body.question,
                                    document_id=document_id, record={**result, "steps": steps})
                 q.put({"type": "done", **{k: v for k, v in result.items() if k != "passages"}})
-            except ModelBusy as exc:
-                q.put({"type": "error", "message": str(exc)})
             except Exception as exc:
-                import logging
-                logging.getLogger(__name__).exception("ask failed for document %d", document_id)
-                q.put({"type": "error", "message": f"Couldn't answer: {exc}"})
+                if isinstance(exc, ModelBusy):
+                    message = str(exc)
+                else:
+                    import logging
+                    logging.getLogger(__name__).exception("ask failed for document %d", document_id)
+                    message = f"Couldn't answer: {exc}"
+                # Failures are logged too: they're the interactions most worth reviewing.
+                record_interaction(user_id=user_id, kind="ask", request=body.question,
+                                   document_id=document_id, record={"error": message, "steps": steps})
+                q.put({"type": "error", "message": message})
             finally:
                 q.put(None)
 
@@ -341,6 +353,225 @@ def ask_document(document_id: int, body: AskRequest, user_id: str = Depends(get_
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+
+# ─── Study sessions ───────────────────────────────────────────────────────────
+# One conversation per document. Every message is planned from the same tools (answer,
+# summarize, concepts, quiz, revise), so a single message can combine them and later messages
+# can change earlier output. See engine/study.py.
+
+class SessionCreate(BaseModel):
+    document_id: int
+
+
+class MessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+_TURN_PRIVATE = ("passages", "sources", "targets", "memory", "models")
+
+
+def _owned_document(db, document_id: int, user_id: str) -> Document:
+    doc = db.query(Document).filter_by(id=document_id, user_id=user_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+def _owned_session(db, session_id: int, user_id: str) -> StudySession:
+    sess = db.query(StudySession).filter_by(id=session_id, user_id=user_id).first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sess
+
+
+def _session_turns(db, session_id: int) -> list[dict]:
+    rows = (db.query(StudyMessage).filter_by(session_id=session_id, role="assistant")
+            .order_by(StudyMessage.id).all())
+    return [json.loads(r.content) for r in rows]
+
+
+def _session_dict(sess: StudySession, turns: int | None = None) -> dict:
+    out = {"session_id": sess.id, "document_id": sess.document_id, "title": sess.title,
+           "created_at": sess.created_at, "updated_at": sess.updated_at}
+    if turns is not None:
+        out["turns"] = turns
+    return out
+
+
+@app.post("/sessions", status_code=201)
+def create_session(body: SessionCreate, user_id: str = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        _owned_document(db, body.document_id, user_id)
+        sess = StudySession(user_id=user_id, document_id=body.document_id)
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        return _session_dict(sess, 0)
+    finally:
+        db.close()
+
+
+@app.get("/sessions")
+def list_sessions(document_id: Optional[int] = None, user_id: str = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        q = db.query(StudySession).filter_by(user_id=user_id)
+        if document_id is not None:
+            q = q.filter_by(document_id=document_id)
+        sessions = q.order_by(StudySession.updated_at.desc()).all()
+        counts = dict(db.query(StudyMessage.session_id, func.count(StudyMessage.id))
+                      .filter(StudyMessage.session_id.in_([s.id for s in sessions] or [0]),
+                              StudyMessage.role == "assistant")
+                      .group_by(StudyMessage.session_id).all())
+        return [_session_dict(s, counts.get(s.id, 0)) for s in sessions]
+    finally:
+        db.close()
+
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: int, user_id: str = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        sess = _owned_session(db, session_id, user_id)
+        doc = db.query(Document).filter_by(id=sess.document_id).first()
+        turns = _session_turns(db, session_id)
+        return {**_session_dict(sess, len(turns)), "document": _doc_dict(doc) if doc else None,
+                "turns": turns}
+    finally:
+        db.close()
+
+
+@app.delete("/sessions/{session_id}", status_code=204)
+def delete_session(session_id: int, user_id: str = Depends(get_current_user)):
+    db = SessionLocal()
+    try:
+        sess = _owned_session(db, session_id, user_id)
+        db.query(StudyMessage).filter_by(session_id=session_id).delete()
+        db.delete(sess)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _save_turn(session_id: int, user_id: str, document_id: int, message: str,
+               turns: list[dict], result: dict) -> dict:
+    """Store the turn in the conversation and log it in full for review. Returns the stored turn."""
+    from datetime import UTC, datetime
+
+    from engine.study import history_text
+    turn = {"turn": len(turns) + 1, "message": message,
+            **{k: v for k, v in result.items() if k not in _TURN_PRIVATE and k != "message"}}
+    db = SessionLocal()
+    try:
+        sess = db.get(StudySession, session_id)
+        db.add(StudyMessage(session_id=session_id, role="assistant",
+                            content=json.dumps(turn, default=str)))
+        if sess:
+            sess.memory_json = json.dumps(result.get("memory") or {})
+            sess.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            if not sess.title:
+                sess.title = message[:80]
+        db.commit()
+    finally:
+        db.close()
+
+    record_interaction(
+        user_id=user_id, kind="turn", request=message, document_id=document_id,
+        record={**result, "session_id": session_id, "turn": turn["turn"],
+                "history": history_text(turns)},
+    )
+    return turn
+
+
+@app.post("/sessions/{session_id}/messages")
+def send_message(session_id: int, body: MessageRequest, user_id: str = Depends(get_current_user)):
+    """Run one turn of the conversation, streaming each step as server-sent events.
+
+    Events: plan, step_start, step, block (one per output), reply, error, done (the stored turn).
+    """
+    from engine.study import run_turn
+
+    db = SessionLocal()
+    try:
+        sess = _owned_session(db, session_id, user_id)
+        doc = _owned_document(db, sess.document_id, user_id)
+        if doc.status != "ready":
+            raise HTTPException(status_code=409, detail=f"Document is not ready (status: {doc.status})")
+        document_id = doc.id
+        memory = json.loads(sess.memory_json) if sess.memory_json else None
+        turns = _session_turns(db, session_id)
+        db.add(StudyMessage(session_id=session_id, role="user", content=body.message))
+        db.commit()
+    finally:
+        db.close()
+
+    def event_generator():
+        q: queue.Queue = queue.Queue()
+
+        def emit(kind, payload):
+            q.put({"type": kind, **payload})
+
+        def run():
+            try:
+                result = run_turn(message=body.message, document_id=document_id, turns=turns,
+                                  memory=memory, emit=emit)
+                turn = _save_turn(session_id, user_id, document_id, body.message, turns, result)
+                if result.get("error"):
+                    q.put({"type": "error", "message": result["error"]})
+                q.put({"type": "done", "turn": turn})
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).exception("turn failed in session %d", session_id)
+                q.put({"type": "error", "message": f"Something went wrong: {exc}"})
+            finally:
+                q.put(None)
+
+        threading.Thread(target=run, daemon=True).start()
+        while (event := q.get()) is not None:
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+_EXPORT_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+@app.get("/sessions/{session_id}/export")
+def export_session(
+    session_id: int,
+    format: str = Query(default="pdf", pattern="^(pdf|docx)$"),
+    turn: Optional[int] = Query(default=None, ge=1),
+    page_size: str = Query(default="A4", pattern="^(A4|letter)$"),
+    user_id: str = Depends(get_current_user),
+):
+    """Download the conversation (or one turn of it) as a Word-style PDF or DOCX."""
+    from engine.export import export_session as render
+    from engine.export import safe_filename
+    db = SessionLocal()
+    try:
+        sess = _owned_session(db, session_id, user_id)
+        doc = db.query(Document).filter_by(id=sess.document_id).first()
+        turns = _session_turns(db, session_id)
+    finally:
+        db.close()
+    if turn is not None:
+        turns = [t for t in turns if t.get("turn") == turn]
+        if not turns:
+            raise HTTPException(status_code=404, detail="Turn not found")
+    doc_name = doc.filename if doc else "Document"
+    title = (turns[0]["message"][:80] if turn is not None else sess.title) or "Study session"
+    data = render(format, title, doc_name, turns, page_size=page_size)
+    name = safe_filename(doc_name) + (f"-turn-{turn}" if turn else "-study") + f".{format}"
+    return Response(content=data, media_type=_EXPORT_TYPES[format],
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
 
 
 def _doc_dict(d: Document) -> dict:
@@ -453,14 +684,7 @@ def get_runs(user_id: str = Depends(get_current_user), db: Session = Depends(get
 MAX_DOC_CHARS = int(os.getenv("MAX_DOC_CHARS", "24000"))
 
 
-def _join_chunks(chunks) -> str:
-    parts, covered = [], 0
-    for c in chunks:
-        # Chunks overlap; keep only text past what's already been added.
-        skip = max(0, covered - c.char_start)
-        parts.append(c.text[skip:])
-        covered = max(covered, c.char_end)
-    return "".join(parts)
+_join_chunks = join_chunks
 
 
 def _resolve_document_text(body: RunRequest, user_id: str) -> str:
@@ -524,8 +748,9 @@ def _log_run(user_id, body: RunRequest, plan, traces, output, document_text, run
             "run_id": run_id,
             "goal": plan.goal,
             "brief": plan.brief.preferences(),
-            "plan": [{"name": s.name, "instructions": s.description,
-                      "input_key": s.input_key, "output_key": s.output_key} for s in plan.steps],
+            "plan": [{"name": s.name, "instructions": s.description, "count": s.count,
+                      "difficulty": s.difficulty, "input_key": s.input_key,
+                      "output_key": s.output_key} for s in plan.steps],
             "steps": [{"name": t.name, "success": t.success, "error": t.error,
                        "time_ms": round(t.execution_time_ms),
                        "tokens": t.input_tokens + t.output_tokens} for t in traces],
@@ -726,6 +951,17 @@ def export_pdf(run_id: int, user_id: str = Depends(get_current_user),
                     headers={"Content-Disposition": f'attachment; filename="study-kit-{run_id}.pdf"'})
 
 
+@app.get("/runs/{run_id}/export/docx")
+def export_docx(run_id: int, user_id: str = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    run = db.query(WorkflowRun).filter_by(id=run_id, user_id=user_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    from engine.export import generate_docx
+    return Response(content=generate_docx(run), media_type=_EXPORT_TYPES["docx"],
+                    headers={"Content-Disposition": f'attachment; filename="study-kit-{run_id}.docx"'})
+
+
 @app.get("/runs/{run_id}/export/anki")
 def export_anki(run_id: int, user_id: str = Depends(get_current_user),
                 db: Session = Depends(get_db)):
@@ -754,8 +990,9 @@ def _build_engine(plan, body: RunRequest) -> ExecutionEngine:
             node.document_id = body.document_id
             node.require_document = True
         if hasattr(node, "set_context"):
+            brief = plan.brief.for_step(step.count, step.difficulty)
             node.set_context(StepContext(request=body.request, goal=plan.goal,
-                                         instructions=step.description, brief=plan.brief))
+                                         instructions=step.description, brief=brief))
         eng.register_node(step.name, node)
     return eng
 

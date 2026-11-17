@@ -98,7 +98,8 @@ jobs:
   #   OCI_HOST    — VM public IP (variable, not secret)
   #   OCI_USER    — SSH user, e.g. ubuntu (variable, not secret)
   #
-  # The VM must have Docker installed and the repo cloned at ~/ai-automation-engine.
+  # The VM must have Docker installed and the repo cloned at ~/adaptive-document-learning-engine
+  # (an old ~/ai-automation-engine checkout is renamed automatically on the first deploy).
   # App env vars live in ~/.env on the VM (not committed to git).
   deploy:
     name: Deploy to Oracle Cloud
@@ -122,7 +123,8 @@ jobs:
           chmod 600 "$KEY_FILE"
 
           REMOTE_CMD="set -e
-          cd ~/ai-automation-engine
+          if [ -d ~/ai-automation-engine ] && [ ! -e ~/adaptive-document-learning-engine ]; then mv ~/ai-automation-engine ~/adaptive-document-learning-engine; fi
+          cd ~/adaptive-document-learning-engine
           git pull origin main
           docker build -t ai-engine . > /tmp/docker-build.log 2>&1 &
           BUILD_PID=\$!

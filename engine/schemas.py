@@ -34,6 +34,13 @@ class RequestBrief(BaseModel):
     def preferences(self) -> dict:
         return self.model_dump(exclude_none=True)
 
+    def for_step(self, count: Optional[int] = None, difficulty: Optional[str] = None) -> RequestBrief:
+        """This brief as one step should see it: the step's own count and difficulty.
+
+        A number in a request belongs to one part of it ("4 bullets and 3 questions"), so a count
+        is never shared between steps."""
+        return self.model_copy(update={"count": count, "difficulty": difficulty or self.difficulty})
+
 
 class WorkflowStep(BaseModel):
     name: str = Field(description="snake_case step name e.g. summarize_document")
@@ -42,6 +49,12 @@ class WorkflowStep(BaseModel):
     )
     input_key: str = Field(description="State key this step reads from")
     output_key: str = Field(description="State key this step writes to")
+    count: Optional[int] = Field(default=None, description="How many items this step should produce")
+    difficulty: Optional[str] = Field(default=None, description="easy | medium | hard, for this step")
+
+    _clamp_count = field_validator("count", mode="before")(RequestBrief.clamp_count.__func__)
+    _norm_difficulty = field_validator("difficulty", mode="before")(
+        RequestBrief.normalise_difficulty.__func__)
 
 
 class WorkflowPlan(BaseModel):

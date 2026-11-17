@@ -135,3 +135,38 @@ def test_request_difficulty_beats_ui_setting():
 
 def test_quiz_is_told_to_stay_within_the_source():
     assert "do not rely on outside knowledge" in _quiz_system()
+
+
+# ── Numbers belong to one step ────────────────────────────────────────────────
+
+def test_steps_carry_their_own_count_and_the_brief_count_is_not_shared():
+    quiz_step = {"name": "generate_quiz", "description": "3 hard questions", "input_key": "summary",
+                 "output_key": "quiz", "count": "3", "difficulty": "Hard"}
+    summary_step = {**STEP, "count": 4}
+    plan = WorkflowPlan(goal="g", estimated_steps=2, steps=[summary_step, quiz_step],
+                        brief={"format": "bullet points", "count": 4})
+    quiz_brief = plan.brief.for_step(plan.steps[1].count, plan.steps[1].difficulty)
+    assert (quiz_brief.count, quiz_brief.difficulty, quiz_brief.format) == (3, "hard", "bullet points")
+    assert plan.brief.for_step(None).count is None
+
+
+def test_planner_prompt_puts_numbers_on_steps():
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = _response(_plan())
+    with patch("engine.intent_parser.get_client", return_value=fake):
+        parse_intent("anything")
+    system = fake.chat.completions.create.call_args[1]["messages"][0]["content"]
+    assert "Never copy one step's number to another step" in system
+
+
+def test_quiz_node_never_returns_more_questions_than_asked():
+    items = [{"question": f"Q{i}", "options": {}, "answer": "A", "explanation": ""} for i in range(5)]
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(items)))],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+    node = GenerateQuizNode(name="quiz", input_key="summary", output_key="quiz")
+    node.set_context(_ctx(count=3))
+    with patch("engine.llm_nodes.get_client", return_value=fake):
+        result = node.execute({"summary": "Source text."})
+    assert result.success and [q["question"] for q in result.output_value] == ["Q0", "Q1", "Q2"]
