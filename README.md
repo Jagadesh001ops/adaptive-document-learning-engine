@@ -131,7 +131,7 @@ Integration tests run against a real Postgres and are skipped when `DATABASE_URL
 
 The production image builds the React app and serves it from FastAPI, so the frontend and API share one origin and one container. On merge to `main`, GitHub Actions runs lint, tests and a frontend build, then smoke tests, waits for manual approval, and deploys over SSH: pull, rebuild the image, restart the container.
 
-It currently runs on a single small VM, with Postgres on Supabase and Redis on Upstash. If you deploy to a machine with around 1 GB of RAM, add swap first — the image build won't survive without it.
+It currently runs on a single small VM behind [Caddy](https://caddyserver.com/), which handles HTTPS (Let's Encrypt) and forwards to the app on `localhost:8000`; the app port itself isn't exposed publicly. Postgres is on Supabase and Redis on Upstash. If you deploy to a machine with around 1 GB of RAM, add swap first — the image build won't survive without it.
 
 ## Known limitations
 

@@ -130,7 +130,7 @@ jobs:
           wait \$BUILD_PID
           echo Build finished
           docker rm -f ai-engine || true
-          docker run -d --name ai-engine --env-file ~/.env -p 8000:8000 --restart unless-stopped ai-engine
+          docker run -d --name ai-engine --env-file ~/.env -p 127.0.0.1:8000:8000 --restart unless-stopped ai-engine
           docker ps --filter name=ai-engine
           echo Deploy complete"
 
