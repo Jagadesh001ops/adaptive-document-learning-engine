@@ -1,4 +1,5 @@
 venv/
+.venv/
 .env
 *.key
 *.pem
@@ -17,3 +18,8 @@ reports/
 research_notes/
 progress.md
 .coverage
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+.playwright-mcp/

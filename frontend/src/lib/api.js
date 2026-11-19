@@ -4,7 +4,7 @@ import { supabase } from "./supabase"
 const BASE = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? "" : "http://localhost:8000")
 
 export async function apiFetch(path, options = {}) {
-  const { data: { session } } = await supabase.auth.getSession()
+  const session = supabase ? (await supabase.auth.getSession()).data.session : null
   const token = session?.access_token
 
   const headers = { ...(options.headers || {}) }

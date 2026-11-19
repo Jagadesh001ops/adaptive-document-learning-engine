@@ -152,3 +152,18 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end tests (mocked API)
+        working-directory: frontend
+        run: npm run test:e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results

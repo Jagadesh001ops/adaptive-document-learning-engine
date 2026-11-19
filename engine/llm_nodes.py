@@ -228,7 +228,7 @@ def attach_citations(items: list, chunks: list) -> None:
     """Add source positions to each quiz item's citation and check its quote is really in that chunk.
 
     Items whose quote can't be found are marked verified=False with a note, never dropped."""
-    from .qa import _norm
+    from .qa import quote_in
     chunk_map = {c.get("chunk_id"): c for c in chunks}
     for item in items:
         cit = item.get("citation")
@@ -243,8 +243,8 @@ def attach_citations(items: list, chunks: list) -> None:
         cit["char_end"] = chunk.get("char_end")
         # Excerpts may skip words with an ellipsis; each piece must appear in the passage.
         excerpt = (cit.get("excerpt") or "").replace(chr(0x2026), "...")
-        parts = [p for p in (_norm(x) for x in excerpt.split("...")) if p]
-        if parts and all(p in _norm(chunk.get("text", "")) for p in parts):
+        parts = [p.strip() for p in excerpt.split("...") if p.strip()]
+        if parts and all(quote_in(p, chunk.get("text", "")) for p in parts):
             item.setdefault("verified", True)
         else:
             item["verified"] = False

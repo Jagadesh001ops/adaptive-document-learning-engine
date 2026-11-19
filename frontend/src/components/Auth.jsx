@@ -15,6 +15,11 @@ export default function Auth() {
     setError(null)
     setMessage(null)
 
+    if (!supabase) {
+      setError("Sign-in isn't configured on this server.")
+      setLoading(false)
+      return
+    }
     if (mode === "signin") {
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) setError(error.message)

@@ -186,7 +186,9 @@ def summarize_progress(sections: List[dict], sessions: List[dict], attempts: Lis
                     for c in chunks:
                         if c in where:
                             state[where[c]]["quizzed"].add(c)
-                elif kind in ("answer", "summary", "concepts"):
+                elif kind in ("answer", "summary", "concepts") and b.get("scope") != "whole":
+                    # An overview of the whole document skims every section; it doesn't count as
+                    # having studied any one of them.
                     for c in chunks:
                         if c in where:
                             state[where[c]]["read"].add(c)

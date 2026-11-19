@@ -58,6 +58,11 @@ async def lifespan(_app: FastAPI):
     # Run init_db in a background thread so the port binds immediately.
     import threading
     threading.Thread(target=init_db, daemon=True).start()
+    # Load the embedding model now rather than on the first search: on a small VM that first
+    # load takes about a minute, which the first user's question would otherwise wait for.
+    if os.getenv("WARM_EMBEDDINGS", "1") == "1":
+        from engine.embeddings import warm_up
+        threading.Thread(target=warm_up, daemon=True).start()
     yield
 
 

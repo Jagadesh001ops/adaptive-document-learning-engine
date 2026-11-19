@@ -84,6 +84,38 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+MAX_GAP = 12    # words of interleaved text allowed between two words of a quote
+
+
+def quote_in(quote: str, text: str) -> bool:
+    """Whether *quote* really appears in *text*.
+
+    PDF extraction can splice margin notes and glossary boxes into the middle of a sentence
+    ("troubled by / were severely punished / such effects of ..."), so a faithful quote isn't
+    always a contiguous substring. When it isn't, accept it if its words appear in the passage in
+    order, interrupted only by short runs of other text. Short quotes must match exactly.
+    """
+    q, t = _norm(quote), _norm(text)
+    if not q:
+        return False
+    if q in t:
+        return True
+    qw, tw = re.findall(r"\w+", q), re.findall(r"\w+", t)
+    if len(qw) < 6:
+        return False
+    for start in (i for i, w in enumerate(tw) if w == qw[0]):
+        pos, ok = start, True
+        for word in qw[1:]:
+            window = tw[pos + 1:pos + 2 + MAX_GAP]
+            if word not in window:
+                ok = False
+                break
+            pos += 1 + window.index(word)
+        if ok and pos - start + 1 <= 2 * len(qw) + MAX_GAP:
+            return True
+    return False
+
+
 def parse_json(text: str) -> dict:
     """Parse a JSON object from model output, tolerating reasoning tags and surrounding prose."""
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
@@ -102,7 +134,7 @@ def check_quotes(answer: dict, passages: List[dict]) -> List[str]:
         cid, quote = c.get("chunk_id"), (c.get("quote") or "").strip()
         if cid not in by_id:
             problems.append(f"Citation points to passage {cid}, which wasn't provided.")
-        elif not quote or _norm(quote) not in _norm(by_id[cid]["text"]):
+        elif not quote_in(quote, by_id[cid]["text"]):
             problems.append(f'Quote not found in passage {cid}: "{quote[:100]}"')
     if answer.get("status") in ("answered", "partial") and not citations:
         problems.append("The answer cites no passages.")
