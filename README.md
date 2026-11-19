@@ -119,7 +119,8 @@ The first upload downloads the embedding model (~90 MB) if it isn't cached yet.
 | `DATABASE_URL` | — | Postgres connection string (pgvector required) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue for background ingestion; `rediss://` for TLS |
 | `ASYNC_INGEST` | `1` | `0` processes uploads in the API process instead of the ARQ worker — useful on a single small server |
-| `MAX_DOC_CHARS` | `24000` | How much of a document a run sends to the model |
+| `MAX_DOC_CHARS` | `24000` | How much of a document a run sends to the model. Whole-document study steps use the same budget, shared equally between the document's sections |
+| `WARM_EMBEDDINGS` | `1` | Load the embedding model at startup so the first search isn't slow; `0` loads it on first use |
 | `SUPABASE_JWT_SECRET` | — | Enables JWT auth. When unset, every request runs as a single dev user |
 | `CORS_ORIGINS` | — | Extra allowed origins, comma-separated |
 | `MAINTENANCE_MODE` | `0` | `1` returns 503 on everything except `/health` and `/metrics` |
@@ -172,9 +173,12 @@ Claude fetches pending logs, reviews each against the source it was based on, po
 ```bash
 ruff check engine/ api.py tests/
 DATABASE_URL=postgresql://postgres:postgres@localhost:5433/ai_engine pytest tests/ -q
+cd frontend && npx playwright install chromium && npm run test:e2e
 ```
 
 Integration tests run against a real Postgres and are skipped when `DATABASE_URL` isn't set. LLM calls and the embedding model are mocked, so the suite doesn't need an API key or network access.
+
+The end-to-end tests in `frontend/e2e` drive the real frontend in Chromium against a mocked API (`e2e/mockApi.js`), so they need no backend: Library progress, running a suggested task, answering a quiz, reopening an open quiz, and typing a message. CI runs them after the frontend build and uploads traces when one fails.
 
 ## Deployment
 
@@ -184,7 +188,8 @@ It currently runs on a single small VM behind [Caddy](https://caddyserver.com/),
 
 ## Known limitations
 
-- **Long documents are truncated.** A run sends at most `MAX_DOC_CHARS` of the document to the model. Whole-book runs need retrieval or map-reduce summarization, which isn't built yet.
+- **Long documents are sampled, not read in full.** A run sends at most `MAX_DOC_CHARS` of the document to the model. In study sessions, a whole-document summary or quiz shares that budget between the sections, so it covers every part but not every passage.
+- **PDF reading order.** Text is extracted line by line across the page, so margin notes and side boxes can land mid-sentence. Quote checks tolerate short interruptions, but search and answers still see the mixed text.
 - **Quiz verification is optional.** It only runs when the planner includes `verify_quiz`, it needs a retrieval step before it, and the same model grades its own answers.
 - **Old runs stay viewable, not editable.** The browser now has one Study screen per document. Runs made before it are still listed in History, and the `/run` and `/documents/{id}/ask` endpoints remain for API use, but they have no memory between requests.
 - **Section pages are approximate.** Chunks don't record page numbers, so a section's pages are estimated from its position in the text.
