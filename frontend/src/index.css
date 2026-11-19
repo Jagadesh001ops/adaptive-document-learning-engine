@@ -1,3 +1,7 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+/* Keep the sticky message bar from hiding whatever is scrolled into view (e.g. by keyboard focus). */
+html {
+  scroll-padding-bottom: 6rem;
+}

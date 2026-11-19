@@ -150,3 +150,28 @@ def test_rate_limit_becomes_model_busy():
     client = FakeClient(RateLimitError("429"))
     with pytest.raises(qa.ModelBusy, match="busy"):
         _run(client, [[P1, P2]])
+
+
+# The real passage from the live log: extraction spliced a glossary box into the sentence.
+SPLICED = ("up twice and ultimately executed. The Roman Church, troubled by\nwere severely punished\n"
+           "such effects of popular readings and questionings of faith, imposed\nSatiety - The state of "
+           "being fulfilled much\nsevere controls over publishers and booksellers and began to maintain\n"
+           "beyond the point of satisfaction\nan Index of Prohibited Books from 1558.\nSeditious - Action")
+
+
+def test_quotes_split_by_margin_notes_still_count():
+    quote = ("imposed severe controls over publishers and booksellers and began to maintain an Index "
+             "of Prohibited Books from 1558.")
+    assert qa.quote_in(quote, SPLICED)
+    assert qa.check_quotes(_answer(quote=quote, chunk_id=2), [{**P2, "text": SPLICED}]) == []
+
+
+def test_made_up_or_reordered_quotes_are_still_rejected():
+    assert not qa.quote_in("the Church banned all printing presses across Europe in 1558", SPLICED)
+    assert not qa.quote_in("maintain an Index of Prohibited Books from 1558 and imposed severe controls",
+                           SPLICED), "words must appear in order"
+    assert not qa.quote_in("Roman Church executed", SPLICED), "short quotes must match exactly"
+    assert not qa.quote_in("", SPLICED)
+    far = "The Roman Church " + "filler " * 30 + "imposed severe controls over publishers"
+    assert not qa.quote_in("The Roman Church imposed severe controls over publishers", far), \
+        "long interruptions are not bridged"

@@ -239,8 +239,14 @@ def spread_chunks(document_id: int, n: int) -> List[dict]:
     return [_chunk_dict(r) for r in spread(rows, n)]
 
 
-def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS) -> tuple[str, List[int]]:
-    """The document's text, cut at max_chars, and the chunks that made it in."""
+def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS,
+                  outline: Optional[List[dict]] = None) -> tuple[str, List[int]]:
+    """Text for a whole-document step, and the chunks it includes.
+
+    A document that fits is sent whole. A longer one is not cut off at max_chars (that would
+    leave out its second half); instead each section gets an equal share, filled with passages
+    spread evenly through it, so a "whole document" summary sees every part.
+    """
     from .chunking import join_chunks
     from .database import DocumentChunk, SessionLocal
     db = SessionLocal()
@@ -249,9 +255,27 @@ def document_text(document_id: int, max_chars: int = MAX_DOC_CHARS) -> tuple[str
                 .order_by(DocumentChunk.chunk_index).all())
     finally:
         db.close()
-    start = rows[0].char_start if rows else 0
-    used = [r.id for r in rows if r.char_start - start < max_chars]
-    return join_chunks(rows)[:max_chars], used
+    full = join_chunks(rows)
+    if len(full) <= max_chars:
+        return full, [r.id for r in rows]
+
+    by_id = {r.id: r for r in rows}
+    if outline:
+        groups = [(s["title"], [by_id[c] for c in s["chunk_ids"] if c in by_id]) for s in outline]
+    else:
+        k = min(8, len(rows))
+        groups = [(f"Part {i + 1}", rows[round(i * len(rows) / k):round((i + 1) * len(rows) / k)])
+                  for i in range(k)]
+    groups = [(title, g) for title, g in groups if g]
+    share = max_chars // max(len(groups), 1)
+    parts, used = [], []
+    for title, group in groups:
+        avg = sum(len(r.text) for r in group) / len(group)
+        picked = spread(group, max(1, int(share // max(avg, 1))))
+        body = "\n[...]\n".join(r.text for r in picked)[:share]
+        parts.append(f"## {title}\n{body}")
+        used += [r.id for r in picked]
+    return "\n\n".join(parts), used
 
 
 class _Row:
@@ -363,7 +387,7 @@ class Turn:
 
     def _worker_input(self, step: TurnStep, plan: TurnPlan, previous: Optional[dict]):
         if step.scope == "whole" and not previous:
-            text, used = document_text(self.document_id)
+            text, used = document_text(self.document_id, outline=self.outline)
             self.sources["document"] = text
             return text, [{"chunk_id": c} for c in used]
         sec = None if previous else self.section(step)

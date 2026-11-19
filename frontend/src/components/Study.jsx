@@ -391,7 +391,7 @@ function Conversation({ doc, start, onChangeDoc }) {
 
       {error && <p className="text-sm text-red-400">{error}</p>}
 
-      <div ref={bottomRef} className="flex gap-2 items-end sticky bottom-4">
+      <div ref={bottomRef} className="flex gap-2 items-end sticky bottom-0 bg-gray-950 border-t border-gray-900 py-4 scroll-mt-24">
         <textarea
           value={input}
           rows={input.includes("\n") ? 3 : 1}

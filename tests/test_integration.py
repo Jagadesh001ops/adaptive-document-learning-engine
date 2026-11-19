@@ -854,3 +854,22 @@ def test_progress_needs_an_owned_ready_document():
         assert client.get(f"/documents/{doc_id}/progress").status_code == 409
     finally:
         _cleanup_doc(doc_id)
+
+
+def test_whole_document_text_samples_every_section_of_a_long_document():
+    from engine.study import document_text
+    chunks = [(i * 100, (i + 1) * 100, f"Section text number {i}. " + "words " * 12) for i in range(40)]
+    doc_id = _library_doc(chunks=chunks)
+    try:
+        ids = _chunk_ids(doc_id)
+        short, used = document_text(doc_id)
+        assert used == ids and "number 39" in short, "a document that fits is sent whole"
+
+        outline = [{"section": i + 1, "title": f"S{i + 1}", "chunk_ids": ids[i * 10:(i + 1) * 10]}
+                   for i in range(4)]
+        text, used = document_text(doc_id, max_chars=600, outline=outline)
+        assert len(text) <= 600 + 4 * 20
+        assert all(f"## S{i}" in text for i in range(1, 5)), "every section is represented"
+        assert any(c in used for c in ids[30:]), "the end of the document is read, not cut off"
+    finally:
+        _cleanup_doc(doc_id)

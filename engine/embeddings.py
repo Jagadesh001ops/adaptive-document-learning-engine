@@ -12,6 +12,15 @@ def _get_model():
     return SentenceTransformer(_MODEL_NAME)
 
 
+def warm_up() -> None:
+    """Load the model and run it once, so the first real search isn't slowed by loading it."""
+    import logging
+    try:
+        _get_model().encode("warm up", normalize_embeddings=True)
+    except Exception as exc:   # searches will try again and report their own error
+        logging.getLogger(__name__).warning("embedding warm-up failed: %s", exc)
+
+
 def embed(text: str) -> List[float]:
     """Return a normalised float embedding for *text* using a local model.
 

@@ -146,3 +146,12 @@ def test_done_counts_each_kind_of_output():
     out = progress.summarize_progress(SECTIONS, [_session(turn)], [])
     assert out["done"]["questions_asked"] == 1 and out["done"]["concepts"] == 1
     assert out["sections"][2]["status"] == "read" and out["sections"][2]["coverage"] == 1.0
+
+
+def test_a_whole_document_overview_does_not_count_as_studying_sections():
+    overview = {"turn": 1, "message": "overview", "blocks": [
+        {"type": "summary", "step": 0, "text": "...", "scope": "whole", "chunk_ids": [1, 3, 5]}]}
+    out = progress.summarize_progress(SECTIONS, [_session(overview)], [])
+    assert out["done"]["summaries"] == 1
+    assert all(s["status"] == "new" for s in out["sections"])
+    assert out["next"]["kind"] == "study" and out["next"]["section"] == 1
