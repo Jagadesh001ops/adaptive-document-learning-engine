@@ -165,15 +165,33 @@ async def _enqueue(job_name: str, **kwargs):
 
 # ─── Documents ────────────────────────────────────────────────────────────────
 
-def _process_document(doc_id: int, text: str, page_count: int, char_count: int) -> None:
+def _process_document(doc_id: int, text: str, page_count: int, char_count: int,
+                      data: bytes | None = None, filename: str = "", content_type: str = "") -> None:
+    """Chunk, embed and store a document's text, replacing any earlier chunks.
+
+    With the original PDF bytes, the text is first re-extracted with the model deciding the
+    reading order of multi-column pages (too slow to do during the upload request itself).
+    """
     import logging
 
     from engine.chunking import chunk_text
     from engine.embeddings import embed_batch
+    from engine.layout import EXTRACTOR, model_ordering_enabled
+    log = logging.getLogger(__name__)
+    if data is not None and model_ordering_enabled() and (
+            content_type == "application/pdf" or filename.lower().endswith(".pdf")):
+        try:
+            result = ingest(data=data, filename=filename, content_type=content_type,
+                            order_with_model=True)
+            text, char_count = result.text, result.char_count
+            log.info("document %d reading order: %s", doc_id, result.layout)
+        except Exception as exc:   # keep the upload's geometric extraction
+            log.warning("model reading order failed for document %d: %s", doc_id, exc)
     db = SessionLocal()
     try:
         chunks = chunk_text(text)
         embeddings = embed_batch([c.text for c in chunks]) if chunks else []
+        db.query(DocumentChunk).filter_by(document_id=doc_id).delete()
         store_chunks(db, doc_id, chunks, embeddings)
         d = db.query(Document).filter_by(id=doc_id).first()
         if d:
@@ -182,6 +200,7 @@ def _process_document(doc_id: int, text: str, page_count: int, char_count: int) 
             d.char_count = char_count
             d.error_message = None
             d.outline_json = None   # the chunks changed, so the section map is rebuilt
+            d.extractor = EXTRACTOR
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -221,14 +240,17 @@ async def upload_document(
             char_count=result.char_count, content_hash=content_hash,
             user_id=user_id,
         )
-        if created:
+        from engine.layout import EXTRACTOR
+        # Uploading a document again re-processes it if it was extracted by an older version.
+        stale = not created and doc.status == "ready" and doc.extractor != EXTRACTOR
+        if created or stale:
             doc.status = "processing"
         db.commit()
         doc_id, doc_status = doc.id, doc.status
     finally:
         db.close()
 
-    if created or doc_status in ("processing", "failed"):
+    if created or stale or doc_status in ("processing", "failed"):
         if doc_status == "failed":
             db = SessionLocal()
             try:
@@ -246,7 +268,8 @@ async def upload_document(
             logging.getLogger(__name__).warning("Redis unavailable (%s), processing in background", exc)
             # Runs in a worker thread after the response is sent; clients poll GET /documents/{id}.
             background_tasks.add_task(_process_document, doc_id, result.text,
-                                      result.page_count, result.char_count)
+                                      result.page_count, result.char_count,
+                                      data, result.filename, result.content_type)
             doc_status = "processing"
 
     return {"document_id": doc_id, "status": doc_status, "created": created,

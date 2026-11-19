@@ -45,6 +45,7 @@ class Document(Base):
     status        = Column(String, default="ready")   # processing | ready | failed
     error_message = Column(Text, nullable=True)
     outline_json  = Column(Text, nullable=True)   # sections with titles, built on first use
+    extractor     = Column(String, nullable=True)  # text extraction version (engine.layout.EXTRACTOR)
     created_at    = Column(DateTime, default=datetime.utcnow)
 
 

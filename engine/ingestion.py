@@ -5,12 +5,15 @@ Size cap: 25 MB.
 OCR fallback: any PDF page whose extracted text is below OCR_MIN_CHARS
 characters is re-processed with Tesseract if it is available; otherwise a
 warning is recorded and the short text is kept as-is.
+Reading order: PDF pages are read block by block (engine/layout.py), so columns,
+margin notes and boxes don't get spliced into each other's sentences. With
+order_with_model, a model decides the order on pages with blocks side by side.
 """
 from __future__ import annotations
 
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,7 @@ class ExtractionResult:
     ocr_pages: List[int]      # 1-indexed page numbers that required OCR
     ocr_skipped_pages: List[int]  # pages that needed OCR but Tesseract unavailable
     text: str
+    layout: dict = field(default_factory=dict)   # pages per reading-order method
 
 
 # ─── Tesseract availability check ─────────────────────────────────────────────
@@ -57,11 +61,34 @@ def _ocr_page(pil_image) -> str:
 
 # ─── Extraction helpers ────────────────────────────────────────────────────────
 
-def _extract_pdf(data: bytes) -> tuple[str, int, list[int], list[int]]:
-    """Return (full_text, page_count, ocr_pages, ocr_skipped_pages)."""
+def _page_text(page, orderer, layout: dict) -> str:
+    """One page's text in reading order. Rotated text (watermarks, spine titles) is dropped."""
+    from .layout import order_page
+    try:
+        # x_tolerance 1.5 (default 3): tightly set PDFs otherwise run words together
+        # ("presentaresiduallearning"); it doesn't split words in normally spaced text.
+        words = [w for w in page.extract_words(x_tolerance=1.5, extra_attrs=["size", "upright"])
+                 if w.get("upright", True)]
+        result = order_page(words, page.width, page.height, orderer)
+    except Exception as exc:   # an odd page shouldn't sink the document
+        logger.warning("layout extraction failed, using plain text: %s", exc)
+        layout["plain"] = layout.get("plain", 0) + 1
+        return page.extract_text() or ""
+    layout[result.method] = layout.get(result.method, 0) + 1
+    return result.text
+
+
+def _extract_pdf(data: bytes, order_with_model: bool = False,
+                 layout: dict | None = None) -> tuple[str, int, list[int], list[int]]:
+    """Return (full_text, page_count, ocr_pages, ocr_skipped_pages). Fills *layout* with how
+    many pages used each reading-order method."""
     global _TESSERACT_OK
 
     import pdfplumber
+
+    from .layout import ModelOrderer
+    orderer = ModelOrderer() if order_with_model else None
+    layout = layout if layout is not None else {}
 
     if _TESSERACT_OK is None:
         _TESSERACT_OK = _tesseract_available()
@@ -79,7 +106,7 @@ def _extract_pdf(data: bytes) -> tuple[str, int, list[int], list[int]]:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             page_count = len(pdf.pages)
             for i, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
+                text = _page_text(page, orderer, layout)
                 if len(text.strip()) < OCR_MIN_CHARS:
                     if _TESSERACT_OK:
                         try:
@@ -119,8 +146,12 @@ class ExtractionError(RuntimeError):
     """Raised when a valid file cannot be parsed. Maps to 422."""
 
 
-def ingest(data: bytes, filename: str, content_type: str) -> ExtractionResult:
+def ingest(data: bytes, filename: str, content_type: str, *,
+           order_with_model: bool = False) -> ExtractionResult:
     """Validate, extract text, and return an ExtractionResult.
+
+    order_with_model: let a model decide the reading order of multi-column PDF pages. Slower
+    (one small call per such page), so it's used in background processing, not on upload.
 
     Raises:
         IngestionError: unsupported type or file too large (caller should 4xx).
@@ -150,8 +181,9 @@ def ingest(data: bytes, filename: str, content_type: str) -> ExtractionResult:
         raise IngestionError("Uploaded file is empty.")
 
     # Extract
+    layout: dict = {}
     if content_type == "application/pdf" or ext == ".pdf":
-        text, page_count, ocr_pages, ocr_skipped = _extract_pdf(data)
+        text, page_count, ocr_pages, ocr_skipped = _extract_pdf(data, order_with_model, layout)
     else:
         text, page_count, ocr_pages, ocr_skipped = _extract_text_file(data)
 
@@ -164,4 +196,5 @@ def ingest(data: bytes, filename: str, content_type: str) -> ExtractionResult:
         ocr_pages=ocr_pages,
         ocr_skipped_pages=ocr_skipped,
         text=text,
+        layout=layout,
     )
