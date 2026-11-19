@@ -52,10 +52,12 @@ async def ingest_document(ctx: dict, document_id: int, raw_bytes: bytes) -> dict
             return {"document_id": document_id, "status": "failed", "error": "document not found"}
 
         try:
+            from engine.layout import model_ordering_enabled
             result = ingest(
                 data=raw_bytes,
                 filename=doc.filename,
                 content_type=doc.content_type,
+                order_with_model=model_ordering_enabled(),
             )
         except (IngestionError, ExtractionError) as exc:
             doc.status = "failed"
@@ -67,12 +69,17 @@ async def ingest_document(ctx: dict, document_id: int, raw_bytes: bytes) -> dict
         chunks = chunk_text(result.text)
         texts = [c.text for c in chunks]
         embeddings = embed_batch(texts) if texts else []
+        from engine.database import DocumentChunk
+        from engine.layout import EXTRACTOR
+        db.query(DocumentChunk).filter_by(document_id=document_id).delete()   # re-processing
         new_chunks = store_chunks(db, document_id, chunks, embeddings) if chunks else 0
 
         doc.status = "ready"
         doc.page_count = result.page_count
         doc.char_count = result.char_count
         doc.error_message = None
+        doc.outline_json = None
+        doc.extractor = EXTRACTOR
         db.commit()
 
         logger.info(

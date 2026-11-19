@@ -873,3 +873,49 @@ def test_whole_document_text_samples_every_section_of_a_long_document():
         assert any(c in used for c in ids[30:]), "the end of the document is read, not cut off"
     finally:
         _cleanup_doc(doc_id)
+
+
+def test_reuploading_a_document_from_an_older_extractor_reprocesses_it():
+    from engine.database import DocumentChunk
+    from engine.layout import EXTRACTOR
+    content = "First sentence of the book. Second sentence follows it. " * 5
+    first = client.post("/documents", files=_txt_file("old.txt", content)).json()
+    doc_id = first["document_id"]
+    db = SessionLocal()
+    try:
+        doc = db.get(Document, doc_id)
+        assert doc.status == "ready" and doc.extractor == EXTRACTOR
+        chunks_before = db.query(DocumentChunk).filter_by(document_id=doc_id).count()
+        doc.extractor, doc.outline_json = None, '{"sections": [], "titled": true}'   # an older upload
+        db.commit()
+    finally:
+        db.close()
+
+    again = client.post("/documents", files=_txt_file("old.txt", content)).json()
+    assert again["document_id"] == doc_id and again["created"] is False
+    assert again["status"] == "processing"
+    db = SessionLocal()
+    try:
+        doc = db.get(Document, doc_id)
+        assert doc.status == "ready" and doc.extractor == EXTRACTOR and doc.outline_json is None
+        assert db.query(DocumentChunk).filter_by(document_id=doc_id).count() == chunks_before, \
+            "old chunks are replaced, not duplicated"
+    finally:
+        db.close()
+
+    same = client.post("/documents", files=_txt_file("old.txt", content)).json()
+    assert same["status"] == "ready", "an up-to-date document isn't processed again"
+    client.delete(f"/documents/{doc_id}")
+
+
+def test_background_processing_reorders_pdfs_with_the_model_when_enabled():
+    import api
+    with patch("engine.layout.model_ordering_enabled", return_value=True), \
+         patch("api.ingest") as reingest, patch("api.store_chunks") as store:
+        reingest.return_value.text = "Reordered text. " * 10
+        reingest.return_value.char_count = 160
+        reingest.return_value.layout = {"model": 1}
+        api._process_document(999999, "original text", 1, 13, b"%PDF", "x.pdf", "application/pdf")
+    assert reingest.call_args.kwargs["order_with_model"] is True
+    stored = store.call_args.args[2]
+    assert "Reordered" in stored[0].text
